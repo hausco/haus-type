@@ -66,6 +66,9 @@ let defaultConfig: [String: Any] = [
   // 隱私：這些 app 在最前面時，只送 app 名稱，不讀游標前後、選取的字與視窗標題
   "noContextApps": ["com.1password.1password", "com.agilebits.onepassword7", "com.bitwarden.desktop",
                     "com.apple.keychainaccess", "com.apple.Passwords"],
+  // 歷史保存天數（-1 永久、0 不保存）、錄音保存天數（給重試與另存用）
+  "historyDays": 30,
+  "audioDays": 7,
   // Typeless 詞庫同步：實驗功能，預設關閉
   "typelessSync": false,
   // 首次啟動引導是否已完成
@@ -878,6 +881,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     setIcon("mic")
     buildMenu()
     OutputMute.recoverIfNeeded()
+    DispatchQueue.global(qos: .utility).async { HistoryStore.prune() }
+    Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { _ in DispatchQueue.global(qos: .utility).async { HistoryStore.prune() } }
     applyDockPolicy()
     let trusted = AXIsProcessTrusted()
     // 設定視窗改了東西：重新套用快捷鍵、重建選單
@@ -946,7 +951,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   @objc func showSettings() { Windows.show(&Windows.settings, title: "HAUS Type 設定", view: SettingsView()) }
-  @objc func showHistory() { Windows.show(&Windows.history, title: "HAUS Type 歷史紀錄", view: HistoryView()) }
+  @objc func showHistory() { Windows.show(&Windows.history, title: "HAUS Type 總覽與歷史紀錄", view: HistoryView()) }
 
   private func buildMenu() {
     let menu = NSMenu()
@@ -957,7 +962,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     menu.addItem(item("貼上上一段", #selector(pasteLast)))
     menu.addItem(item("貼上上一段原文（未整理）", #selector(pasteLastRaw)))
     menu.addItem(item("複製上一段", #selector(copyLast)))
-    menu.addItem(item("歷史紀錄…", #selector(showHistory)))
+    menu.addItem(item("總覽與歷史紀錄…", #selector(showHistory)))
     menu.addItem(.separator())
     // 翻譯目標：設定裡勾了幾種就列幾種，打勾的是目前用的
     let tmenu = NSMenu()
@@ -1067,6 +1072,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     OutputMute.end()
     spec?.task.cancel(); spec = nil
     cancelled = (audio, seconds, ctx, mode)
+    if seconds * 1000 >= config.double("minHoldMs") {
+      let id = HistoryStore.newID()
+      var e: [String: Any] = ["id": id, "ts": ISO8601DateFormatter().string(from: Date()), "app": ctx.bundle, "seconds": seconds,
+                              "raw": "", "text": "", "kind": mode.rawValue, "status": "cancelled"]
+      if let a = HistoryStore.saveAudio(audio, id: id) { e["audio"] = a }
+      HistoryStore.append(e)
+    }
     setStatus("待命", icon: "mic")
     hud.cancelled()
     sound(Tone.cancel)
@@ -1117,6 +1129,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     sound(Tone.stop)
     hud.processing()
     let ctx = self.ctx, m = self.mode
+    let id = HistoryStore.newID()
+    let audioName = HistoryStore.saveAudio(audio, id: id)
     busy += 1
     setStatus(m == .ask ? "思考中" : "辨識中", icon: "ellipsis.circle")
     // 預先轉寫之後沒有再講話、模式也沒變：直接用預先算好的結果
@@ -1124,32 +1138,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       let t = Date()
       Task {
         let o = await p.task.value
-        await self.deliver(o, seconds: seconds, ctx: ctx, waitMs: Int(Date().timeIntervalSince(t) * 1000), hit: true, mode: m)
+        await self.deliver(o, seconds: seconds, ctx: ctx, waitMs: Int(Date().timeIntervalSince(t) * 1000), hit: true, mode: m, id: id, audio: audioName)
       }
       return
     }
     pending?.task.cancel()
-    Task { await self.process(audio, seconds: seconds, ctx: ctx, mode: m) }
+    Task { await self.process(audio, seconds: seconds, ctx: ctx, mode: m, id: id, audioName: audioName) }
   }
 
-  private func process(_ audio: Data, seconds: Double, ctx: Context, mode: Mode = .dictate) async {
+  private func process(_ audio: Data, seconds: Double, ctx: Context, mode: Mode = .dictate, id: String = HistoryStore.newID(), audioName: String? = nil) async {
     let t = Date()
     let o = await compute(audio, ctx: ctx, mode: mode)
-    await deliver(o, seconds: seconds, ctx: ctx, waitMs: Int(Date().timeIntervalSince(t) * 1000), hit: false, mode: mode)
+    await deliver(o, seconds: seconds, ctx: ctx, waitMs: Int(Date().timeIntervalSince(t) * 1000), hit: false, mode: mode, id: id, audio: audioName)
   }
 
   // 把結果貼上並更新畫面；waitMs＝放開後實際等了多久
-  private func deliver(_ o: Outcome, seconds: Double, ctx: Context, waitMs: Int, hit: Bool, mode: Mode = .dictate) async {
+  private func deliver(_ o: Outcome, seconds: Double, ctx: Context, waitMs: Int, hit: Bool, mode: Mode = .dictate,
+                       id: String = HistoryStore.newID(), audio: String? = nil) async {
     await MainActor.run {
       self.busy -= 1
+      let empty = o.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      let status = o.error != nil ? "error" : empty ? "empty" : (o.note == "answer" ? "answer" : "ok")
+      var entry: [String: Any] = ["id": id, "ts": ISO8601DateFormatter().string(from: Date()), "app": ctx.bundle, "seconds": seconds,
+                                  "raw": o.raw, "text": o.text, "mode": o.note, "kind": mode.rawValue, "status": status,
+                                  "ms_transcribe": o.msT, "ms_cleanup": o.msC, "wait_ms": waitMs, "speculative": hit]
+      if let audio { entry["audio"] = audio }
+      if let err = o.error { entry["error"] = err }
+      HistoryStore.append(entry)
       if let err = o.error {
         self.setStatus(err, icon: "exclamationmark.triangle")
         self.hud.flash(err.replacingOccurrences(of: "轉寫失敗：", with: ""), seconds: 3.5)
         return
       }
-      appendHistory(["ts": ISO8601DateFormatter().string(from: Date()), "app": ctx.bundle, "seconds": seconds,
-                     "raw": o.raw, "text": o.text, "mode": o.note, "kind": mode.rawValue, "ms_transcribe": o.msT, "ms_cleanup": o.msC,
-                     "wait_ms": waitMs, "speculative": hit])
       log("貼上：等待 \(waitMs) ms（\(hit ? "預先轉寫命中" : "一般")）")
       self.last = Last(raw: o.raw, text: o.text)
       if o.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1252,6 +1272,10 @@ func relaunch() {
 }
 
 func appendHistory(_ entry: [String: Any]) {
+  HistoryStore.append(entry)
+}
+
+func appendHistoryLegacy(_ entry: [String: Any]) {
   guard let data = try? JSONSerialization.data(withJSONObject: entry), var line = String(data: data, encoding: .utf8) else { return }
   line += "\n"
   if let h = try? FileHandle(forWritingTo: historyURL) {
@@ -1307,9 +1331,16 @@ let args = CommandLine.arguments
 if let i = args.firstIndex(of: "--render-settings"), i + 2 < args.count {
   ensureHome()
   _ = NSApplication.shared
-  let view = SettingsView(tab: Int(args[i + 1]) ?? 0)
-  let host = NSHostingView(rootView: view)
-  host.frame = NSRect(x: 0, y: 0, width: 600, height: 520)
+  // 分頁編號前加 h 是總覽與歷史視窗（例如 h0、h1）
+  let spec = args[i + 1]
+  let host: NSView
+  if spec.hasPrefix("h") {
+    let v = NSHostingView(rootView: HistoryView(tab: Int(spec.dropFirst()) ?? 0))
+    v.frame = NSRect(x: 0, y: 0, width: 680, height: 600); host = v
+  } else {
+    let v = NSHostingView(rootView: SettingsView(tab: Int(spec) ?? 0))
+    v.frame = NSRect(x: 0, y: 0, width: 600, height: 520); host = v
+  }
   let win = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
   win.contentView = host
   host.layoutSubtreeIfNeeded()
