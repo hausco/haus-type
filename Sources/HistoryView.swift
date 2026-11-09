@@ -1,4 +1,4 @@
-// 歷史紀錄視窗：最近 300 段的整理結果與原稿，可以複製。資料來源是 ~/.yuvoice/history.jsonl。
+// 歷史紀錄視窗：最近 300 段的整理結果與原稿，可以複製。資料來源是 ~/.haustype/history.jsonl。
 
 import SwiftUI
 

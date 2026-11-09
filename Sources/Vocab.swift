@@ -51,7 +51,7 @@ enum VocabStore {
       if keep.contains(t) { lines.append(line); keep.remove(t) }
     }
     if lines.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
-      lines = ["# YuVoice 專有名詞表：一行一個，# 開頭是註解。",
+      lines = ["# HAUS Type 專有名詞表：一行一個，# 開頭是註解。",
                "# 括號裡寫常被聽錯的樣子，例如「GitHub（get hub、吉哈布）」。改完下一段話就會用新的。"]
     }
     while lines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { lines.removeLast() }

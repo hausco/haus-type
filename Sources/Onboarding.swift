@@ -38,7 +38,7 @@ final class OnboardingModel: ObservableObject {
   }
 
   func openAccessibility() {
-    // 讓 YuVoice 出現在清單裡（系統會跳一次詢問），再打開設定頁
+    // 讓 HAUS Type 出現在清單裡（系統會跳一次詢問），再打開設定頁
     _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
   }
@@ -74,7 +74,7 @@ struct OnboardingView: View {
       HStack(spacing: 14) {
         Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56)
         VStack(alignment: .leading, spacing: 4) {
-          Text("歡迎使用 YuVoice").font(.title2).bold()
+          Text("歡迎使用 HAUS Type").font(.title2).bold()
           Text("按一下快捷鍵講話，再按一下，整理好的文字就會打進游標所在的地方。").foregroundStyle(.secondary)
         }
       }
@@ -82,7 +82,7 @@ struct OnboardingView: View {
       step(1, "麥克風", done: m.micOK, detail: "聽你講話用。") {
         Button(m.mic == .denied ? "到系統設定打開" : "允許麥克風") { m.requestMic() }
       }
-      step(2, "輔助使用", done: m.trusted, detail: "偵測快捷鍵、把文字貼進輸入框用。在清單裡打開 YuVoice。") {
+      step(2, "輔助使用", done: m.trusted, detail: "偵測快捷鍵、把文字貼進輸入框用。在清單裡打開 HAUS Type。") {
         Button("開啟設定") { m.openAccessibility() }
       }
       step(3, "Fn 鍵", done: nil, detail: "要用 Fn（🌐）鍵，請把「按下 🌐 鍵時」改成「不做任何事」。用滑鼠中鍵或自訂組合鍵可以略過。") {

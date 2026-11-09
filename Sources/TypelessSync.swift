@@ -1,7 +1,7 @@
 // 跟 Typeless 雙向同步詞庫（不使用 Typeless 的登入憑證）。
-// Typeless → YuVoice：讀 Typeless（Electron）本機的 HTTP 快取裡 /user/dictionary/list 的回應（brotli 壓縮的 JSON），
+// Typeless → HAUS Type：讀 Typeless（Electron）本機的 HTTP 快取裡 /user/dictionary/list 的回應（brotli 壓縮的 JSON），
 //   寫進 vocabulary.txt 的「Typeless 同步區」。快取只在使用者打開 Typeless 字典頁時更新。
-// YuVoice → Typeless：把 YuVoice 有、Typeless 沒有的詞寫成一欄 CSV（一行一個詞），
+// HAUS Type → Typeless：把 HAUS Type 有、Typeless 沒有的詞寫成一欄 CSV（一行一個詞），
 //   使用者在 Typeless 字典頁按「匯入 CSV」。寫入 Typeless 必須經過它的伺服器，所以這一步留給使用者按。
 
 import Compression
@@ -124,7 +124,7 @@ func syncWithTypeless(writeCSV: Bool) -> SyncReport {
   while userLines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { userLines.removeLast() }
   let userTerms = userLines.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
   let userKeys = Set(userTerms.map(norm))
-  // Typeless → YuVoice：使用者區已經有的不重複寫
+  // Typeless → HAUS Type：使用者區已經有的不重複寫
   var seen = Set<String>()
   let pulled = dict.terms.filter { t in
     let k = norm(t)
@@ -136,7 +136,7 @@ func syncWithTypeless(writeCSV: Bool) -> SyncReport {
   let block = [syncBegin, "# Typeless 快取時間 \(f.string(from: dict.updated))，共 \(dict.total) 個詞"] + pulled + [syncEnd]
   let newText = (userLines + [""] + block).joined(separator: "\n") + "\n"
   if newText != text { try? newText.write(to: vocabURL, atomically: true, encoding: .utf8); rep.changed = true }
-  // YuVoice → Typeless：使用者區有、Typeless 沒有的詞
+  // HAUS Type → Typeless：使用者區有、Typeless 沒有的詞
   if writeCSV {
     let typelessKeys = Set(dict.terms.map(norm))
     var pushSeen = Set<String>()

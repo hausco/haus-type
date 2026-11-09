@@ -1,8 +1,8 @@
-# YuVoice
+# HAUS Type
 
 macOS 選單列的語音輸入工具。按一下快捷鍵講話，再按一下，整理好的文字就會打進游標所在的輸入框。LINE、Slack、Mail、瀏覽器、Claude、ChatGPT、備忘錄都能用。
 
-<img src="icon/icon-1024.png" width="96" alt="YuVoice 圖示">
+<img src="icon/icon-1024.png" width="96" alt="HAUS Type 圖示">
 
 ## 會幫你做什麼
 
@@ -17,11 +17,11 @@ macOS 選單列的語音輸入工具。按一下快捷鍵講話，再按一下�
 
 ## 安裝
 
-1. 到 [Releases](https://github.com/hausco/yuvoice/releases/latest) 下載 `YuVoice-版本.dmg`。
-2. 打開 DMG，把 YuVoice 拖進「應用程式」。
-3. 打開 YuVoice，照設定引導完成四步：
+1. 到 [Releases](https://github.com/hausco/haus-type/releases/latest) 下載 `HAUS-Type-版本.dmg`。
+2. 打開 DMG，把 HAUS Type 拖進「應用程式」。
+3. 打開 HAUS Type，照設定引導完成四步：
    - 允許麥克風。
-   - 在「輔助使用」打開 YuVoice（偵測快捷鍵與貼上文字用）。
+   - 在「輔助使用」打開 HAUS Type（偵測快捷鍵與貼上文字用）。
    - 要用 Fn 鍵的話，到「系統設定 → 鍵盤」把「按下 🌐 鍵時」改成「不做任何事」。
    - 貼上 OpenRouter 金鑰。
 
@@ -29,11 +29,11 @@ macOS 選單列的語音輸入工具。按一下快捷鍵講話，再按一下�
 
 ## OpenRouter 金鑰與費用
 
-YuVoice 透過 [OpenRouter](https://openrouter.ai) 呼叫 AI 模型，費用由你自己的 OpenRouter 帳戶支付，YuVoice 不另外收費。
+HAUS Type 透過 [OpenRouter](https://openrouter.ai) 呼叫 AI 模型，費用由你自己的 OpenRouter 帳戶支付，HAUS Type 不另外收費。
 
 1. 到 [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys) 註冊並建立金鑰（`sk-or-` 開頭）。
 2. 在 OpenRouter 儲值，幾美元可以用很久：一天講 1 小時，轉寫加整理一個月約 3 到 8 美元。
-3. 把金鑰貼進 YuVoice 的設定引導或「設定 → 金鑰與模型」。YuVoice 會先實際測一次，通過才存進 macOS 鑰匙圈。
+3. 把金鑰貼進 HAUS Type 的設定引導或「設定 → 金鑰與模型」。HAUS Type 會先實際測一次，通過才存進 macOS 鑰匙圈。
 
 ## 使用方式
 
@@ -46,12 +46,12 @@ YuVoice 透過 [OpenRouter](https://openrouter.ai) 呼叫 AI 模型，費用由�
 
 - 錄音與游標附近的文字（前 400 字、後 200 字、選取的字）會送到 OpenRouter，再轉給模型供應商（OpenAI、Anthropic）處理。
 - 密碼欄位不讀取。
-- 歷史紀錄、詞彙表、設定只存在你的 Mac：`~/.yuvoice/`。
+- 歷史紀錄、詞彙表、設定只存在你的 Mac：`~/.haustype/`。
 - 金鑰存在 macOS 鑰匙圈，不寫進任何檔案。
 
 ## 實驗功能：與 Typeless 同步詞庫
 
-有裝 Typeless 的話，可以在「設定 → 實驗功能」打開。YuVoice 會讀 Typeless 在本機的字典快取，把詞併進詞彙表；YuVoice 有、Typeless 沒有的詞會寫成 CSV，在 Typeless「字典」頁按「匯入 CSV」就能加進去。不需要 Typeless 的帳號密碼，但 Typeless 改版時可能失效。
+有裝 Typeless 的話，可以在「設定 → 實驗功能」打開。HAUS Type 會讀 Typeless 在本機的字典快取，把詞併進詞彙表；HAUS Type 有、Typeless 沒有的詞會寫成 CSV，在 Typeless「字典」頁按「匯入 CSV」就能加進去。不需要 Typeless 的帳號密碼，但 Typeless 改版時可能失效。
 
 ## 從原始碼編譯
 
@@ -62,7 +62,7 @@ YuVoice 透過 [OpenRouter](https://openrouter.ai) 呼叫 AI 模型，費用由�
 ./release.sh          # 發佈：Developer ID 簽章、公證、做成 DMG（需要 Apple Developer 帳號）
 ```
 
-進階設定可以直接改 `~/.yuvoice/` 裡的檔案：`config.json`（設定）、`vocabulary.txt`（詞彙表）、`prompt.md`（整理規則），改完不用重開。
+進階設定可以直接改 `~/.haustype/` 裡的檔案：`config.json`（設定）、`vocabulary.txt`（詞彙表）、`prompt.md`（整理規則），改完不用重開。
 
 ## 授權
 

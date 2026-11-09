@@ -1,4 +1,4 @@
-// YuVoice 設定視窗（SwiftUI）：一般、金鑰與模型、專有名詞、實驗功能、關於。
+// HAUS Type 設定視窗（SwiftUI）：一般、金鑰與模型、專有名詞、實驗功能、關於。
 // 改動立刻寫進 config.json，並發出 configChanged 通知讓主程式重新套用（例如快捷鍵）。
 
 import AVFoundation
@@ -6,7 +6,7 @@ import ServiceManagement
 import SwiftUI
 
 extension Notification.Name {
-  static let yuConfigChanged = Notification.Name("YuVoiceConfigChanged")
+  static let yuConfigChanged = Notification.Name("HausTypeConfigChanged")
 }
 
 let transcribeModels: [(String, String)] = [
@@ -154,8 +154,8 @@ final class SettingsModel: ObservableObject {
   func runTypelessSync() {
     let r = syncWithTypeless(writeCSV: true)
     if let e = r.error { syncReport = e; return }
-    var s = "Typeless 有 \(r.typelessTotal) 個詞，\(r.pulled) 個已同步進 YuVoice。"
-    s += r.pushed > 0 ? " YuVoice 有 \(r.pushed) 個詞 Typeless 沒有，已寫成 CSV，到 Typeless「字典」頁按「匯入 CSV」選這個檔。" : " 兩邊已經一致。"
+    var s = "Typeless 有 \(r.typelessTotal) 個詞，\(r.pulled) 個已同步進 HAUS Type。"
+    s += r.pushed > 0 ? " HAUS Type 有 \(r.pushed) 個詞 Typeless 沒有，已寫成 CSV，到 Typeless「字典」頁按「匯入 CSV」選這個檔。" : " 兩邊已經一致。"
     syncReport = s
     if r.pushed > 0 { NSWorkspace.shared.activateFileViewerSelecting([typelessCSV]) }
   }
@@ -307,19 +307,19 @@ struct SettingsView: View {
       HStack(spacing: 12) {
         Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56)
         VStack(alignment: .leading) {
-          Text("YuVoice").font(.title2).bold()
+          Text("HAUS Type").font(.title2).bold()
           Text("版本 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "開發版")")
             .foregroundStyle(.secondary)
         }
       }
       Text("隱私").font(.headline)
-      Text("錄音與游標附近的文字會送到 OpenRouter，再轉給你選的模型供應商（OpenAI、Anthropic 等）處理。歷史紀錄、詞彙表與設定只存在這台 Mac 的 ~/.yuvoice 資料夾。密碼欄位不會讀取。")
+      Text("錄音與游標附近的文字會送到 OpenRouter，再轉給你選的模型供應商（OpenAI、Anthropic 等）處理。歷史紀錄、詞彙表與設定只存在這台 Mac 的 ~/.haustype 資料夾。密碼欄位不會讀取。")
         .font(.callout).fixedSize(horizontal: false, vertical: true)
       Text("授權").font(.headline)
       Text("MIT 授權。整理規則改寫自 jarvis-voice（MIT）。").font(.callout)
       HStack {
         Button("開啟資料夾") { NSWorkspace.shared.open(homeDir) }
-        Link("專案網站", destination: URL(string: "https://github.com/hausco/yuvoice")!)
+        Link("專案網站", destination: URL(string: "https://github.com/hausco/haus-type")!)
       }
       Spacer()
     }
@@ -328,7 +328,7 @@ struct SettingsView: View {
 }
 
 extension Notification.Name {
-  static let yuOpenVocabFile = Notification.Name("YuVoiceOpenVocabFile")
+  static let yuOpenVocabFile = Notification.Name("HausTypeOpenVocabFile")
 }
 
 // 視窗管理：同一時間只開一個設定視窗

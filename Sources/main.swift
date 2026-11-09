@@ -1,4 +1,4 @@
-// YuVoice：macOS 語音輸入。按快捷鍵講話，轉寫並交給 AI 整理後貼進游標所在的輸入框。
+// HAUS Type：macOS 語音輸入。按快捷鍵講話，轉寫並交給 AI 整理後貼進游標所在的輸入框。
 // 按一下快捷鍵開始錄音、再按一下結束：轉寫（OpenRouter）→ Claude 整理 → 貼進游標所在的輸入框。
 // 整理規則改寫自 jarvis-voice（MIT，github.com/urusaqqrun/jarvis-voice）的 core/editor.mjs。
 // 單檔原生 Swift，用 build.sh 以 swiftc 編成 .app，不需要 Xcode 專案。
@@ -10,13 +10,13 @@ import ServiceManagement
 
 // MARK: - 路徑與設定
 
-// 所有使用者資料放在 ~/.yuvoice：設定、詞彙表、整理規則、歷史
-let homeDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".yuvoice")
+// 所有使用者資料放在 ~/.haustype：設定、詞彙表、整理規則、歷史
+let homeDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".haustype")
 let configURL = homeDir.appendingPathComponent("config.json")
 let vocabURL = homeDir.appendingPathComponent("vocabulary.txt")
 let promptURL = homeDir.appendingPathComponent("prompt.md")
 let historyURL = homeDir.appendingPathComponent("history.jsonl")
-let logURL = homeDir.appendingPathComponent("yuvoice.log")
+let logURL = homeDir.appendingPathComponent("haustype.log")
 
 // 設定檔沒寫的欄位一律用這裡的預設值
 let defaultConfig: [String: Any] = [
@@ -46,7 +46,7 @@ let defaultConfig: [String: Any] = [
   "typelessSync": false,
   // 首次啟動引導是否已完成
   "onboarded": false,
-  "keychainService": "yuvoice",
+  "keychainService": "haustype",
   "keychainAccount": "openrouter",
   // 依 app 調語氣：key 是 bundle id 的前綴
   "styles": [
@@ -111,8 +111,16 @@ final class Config {
 let config = Config()
 
 // 第一次執行時建立資料夾，並把預設的設定、詞彙表、整理規則寫出來，方便直接編輯
+// 舊名 YuVoice 的資料夾與鑰匙圈項目（改名前的版本），第一次開啟時自動搬過來
+let legacyHomeDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".yuvoice")
+let legacyKeychainService = "yuvoice"
+
 func ensureHome() {
   let fm = FileManager.default
+  if !fm.fileExists(atPath: homeDir.path), fm.fileExists(atPath: legacyHomeDir.path) {
+    // 複製而不是搬移：舊資料夾原樣留著當備份
+    try? fm.copyItem(at: legacyHomeDir, to: homeDir)
+  }
   try? fm.createDirectory(at: homeDir, withIntermediateDirectories: true)
   if !fm.fileExists(atPath: configURL.path) {
     let starter: [String: Any] = [
@@ -164,8 +172,17 @@ func apiKey() -> String? {
     kSecMatchLimit as String: kSecMatchLimitOne,
   ]
   var out: CFTypeRef?
-  guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let data = out as? Data else { return nil }
-  return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+  if SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let data = out as? Data {
+    return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+  // 新位置沒有：讀舊名 YuVoice 存的金鑰，搬到新位置
+  var legacy = query
+  legacy[kSecAttrService as String] = legacyKeychainService
+  var old: CFTypeRef?
+  guard SecItemCopyMatching(legacy as CFDictionary, &old) == errSecSuccess, let data = old as? Data,
+        let key = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else { return nil }
+  if saveAPIKey(key) { log("已把舊版 YuVoice 的金鑰搬到 HAUS Type") }
+  return key
 }
 
 func saveAPIKey(_ key: String) -> Bool {
@@ -177,7 +194,7 @@ func saveAPIKey(_ key: String) -> Bool {
   SecItemDelete(base as CFDictionary)
   var add = base
   add[kSecValueData as String] = Data(key.utf8)
-  add[kSecAttrLabel as String] = "YuVoice OpenRouter 金鑰"
+  add[kSecAttrLabel as String] = "HAUS Type OpenRouter 金鑰"
   return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
 }
 
@@ -325,8 +342,8 @@ final class Recorder {
     let engine = AVAudioEngine()
     let input = engine.inputNode
     let inFormat = input.outputFormat(forBus: 0)
-    guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else { throw NSError(domain: "YuVoice", code: 1, userInfo: [NSLocalizedDescriptionKey: "麥克風開不起來（沒有輸入裝置或沒有權限）"]) }
-    guard let converter = AVAudioConverter(from: inFormat, to: outFormat) else { throw NSError(domain: "YuVoice", code: 2, userInfo: [NSLocalizedDescriptionKey: "轉不了麥克風格式"]) }
+    guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else { throw NSError(domain: "HAUS Type", code: 1, userInfo: [NSLocalizedDescriptionKey: "麥克風開不起來（沒有輸入裝置或沒有權限）"]) }
+    guard let converter = AVAudioConverter(from: inFormat, to: outFormat) else { throw NSError(domain: "HAUS Type", code: 2, userInfo: [NSLocalizedDescriptionKey: "轉不了麥克風格式"]) }
     converter.downmix = true
     input.installTap(onBus: 0, bufferSize: 2048, format: inFormat) { [weak self] buffer, _ in
       guard let self else { return }
@@ -414,7 +431,7 @@ func postJSON(_ urlString: String, _ body: [String: Any], key: String, timeout: 
   req.httpMethod = "POST"
   req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
   req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-  req.setValue("YuVoice", forHTTPHeaderField: "X-Title")
+  req.setValue("HAUS Type", forHTTPHeaderField: "X-Title")
   req.httpBody = try JSONSerialization.data(withJSONObject: body)
   return try await send(req)
 }
@@ -442,7 +459,7 @@ func transcribe(_ wavData: Data, key: String) async throws -> String {
   if urlString.contains("api.openai.com") {
     var req = URLRequest(url: URL(string: urlString)!, timeoutInterval: timeout)
     req.httpMethod = "POST"
-    let boundary = "yuvoice-\(UUID().uuidString)"
+    let boundary = "haustype-\(UUID().uuidString)"
     req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
     req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
     var body = Data()
@@ -804,7 +821,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   @objc func showOnboarding() {
-    Windows.show(&Windows.onboarding, title: "YuVoice 設定引導", view: OnboardingView { [weak self] in
+    Windows.show(&Windows.onboarding, title: "HAUS Type 設定引導", view: OnboardingView { [weak self] in
       config.set("onboarded", true)
       Windows.onboarding?.close()
       // 權限是在這次執行中才給的：重開一次讓快捷鍵生效
@@ -812,8 +829,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     })
   }
 
-  @objc func showSettings() { Windows.show(&Windows.settings, title: "YuVoice 設定", view: SettingsView()) }
-  @objc func showHistory() { Windows.show(&Windows.history, title: "YuVoice 歷史紀錄", view: HistoryView()) }
+  @objc func showSettings() { Windows.show(&Windows.settings, title: "HAUS Type 設定", view: SettingsView()) }
+  @objc func showHistory() { Windows.show(&Windows.history, title: "HAUS Type 歷史紀錄", view: HistoryView()) }
 
   private func buildMenu() {
     let menu = NSMenu()
@@ -845,7 +862,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
     menu.addItem(loginItem)
     menu.addItem(.separator())
-    menu.addItem(item("結束 YuVoice", #selector(quit)))
+    menu.addItem(item("結束 HAUS Type", #selector(quit)))
     status.menu = menu
   }
 
@@ -856,7 +873,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func setIcon(_ symbol: String) {
-    let img = NSImage(systemSymbolName: symbol, accessibilityDescription: "YuVoice")
+    let img = NSImage(systemSymbolName: symbol, accessibilityDescription: "HAUS Type")
     img?.isTemplate = true
     status.button?.image = img
   }
@@ -1028,15 +1045,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       return
     }
     let f = DateFormatter(); f.dateFormat = "M/d HH:mm"
-    var lines = ["Typeless 字典 \(r.typelessTotal) 個詞（快取時間 \(r.updated.map { f.string(from: $0) } ?? "未知")），其中 \(r.pulled) 個已同步進 YuVoice。"]
+    var lines = ["Typeless 字典 \(r.typelessTotal) 個詞（快取時間 \(r.updated.map { f.string(from: $0) } ?? "未知")），其中 \(r.pulled) 個已同步進 HAUS Type。"]
     if r.paged { lines.append("Typeless 的詞超過 150 個，快取只有第一頁，其餘的詞沒有同步到。") }
     lines.append("快取只在打開 Typeless「字典」頁時更新；剛在 Typeless 加了詞，先去字典頁看一下再同步。")
     if r.pushed > 0 {
-      lines.append("YuVoice 有 \(r.pushed) 個詞是 Typeless 沒有的，已寫成 typeless-import.csv。到 Typeless「字典」頁按「匯入 CSV」選這個檔即可。")
+      lines.append("HAUS Type 有 \(r.pushed) 個詞是 Typeless 沒有的，已寫成 typeless-import.csv。到 Typeless「字典」頁按「匯入 CSV」選這個檔即可。")
       alert.addButton(withTitle: "在 Finder 顯示 CSV")
       alert.addButton(withTitle: "好")
     } else {
-      lines.append("YuVoice 的詞 Typeless 都有了，不用匯入。")
+      lines.append("HAUS Type 的詞 Typeless 都有了，不用匯入。")
       alert.addButton(withTitle: "好")
     }
     alert.informativeText = lines.joined(separator: "\n\n")
@@ -1088,7 +1105,7 @@ func appendHistory(_ entry: [String: Any]) {
 }
 
 // MARK: - 終端機測試模式
-// YuVoice --test 檔案.wav [--bundle com.apple.Notes] [--before 游標前的字] [--selected 選取的字] [--raw 直接給原稿跳過轉寫]
+// HAUS Type --test 檔案.wav [--bundle com.apple.Notes] [--before 游標前的字] [--selected 選取的字] [--raw 直接給原稿跳過轉寫]
 
 func runTest(_ args: [String]) -> Int32 {
   ensureHome()
