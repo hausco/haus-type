@@ -7,6 +7,7 @@ import AVFoundation
 import ApplicationServices
 import Cocoa
 import ServiceManagement
+import SwiftUI
 
 // MARK: - 路徑與設定
 
@@ -22,6 +23,10 @@ let logURL = homeDir.appendingPathComponent("haustype.log")
 let defaultConfig: [String: Any] = [
   "transcribeURL": "https://openrouter.ai/api/v1/audio/transcriptions",
   "transcribeModel": "openai/gpt-transcribe",
+  // 辨識引擎：cloud（OpenRouter）或 local（本機 Breeze-ASR-25，錄音不出這台 Mac）
+  "transcribeEngine": "cloud",
+  "localPython": "~/.haustype/local/venv/bin/python",
+  "localModel": "~/.haustype/local/breeze-mlx-fp16",
   "language": "zh",
   "chatURL": "https://openrouter.ai/api/v1/chat/completions",
   "cleanupModel": "anthropic/claude-haiku-5.5",
@@ -30,6 +35,17 @@ let defaultConfig: [String: Any] = [
   "reasoning": ["enabled": false],
   // 公開版預設只用 Fn；滑鼠中鍵（瀏覽器用來開新分頁）與自訂組合鍵在設定視窗自己開
   "hotkeys": ["fn"],
+  // 翻譯與隨便問的快捷鍵（Typeless 預設：Fn＋Shift、Fn＋Space）
+  "translateHotkeys": ["fn+shift"],
+  "askHotkeys": ["fn+space"],
+  // 翻譯目標：最多 3 種，目前用 translateTarget
+  "translateTargets": ["英文"],
+  "translateTarget": "英文",
+  // 隨便問用較聰明的模型；回答較長，逾時放寬
+  "askModel": "anthropic/claude-sonnet-5.5",
+  // Sonnet 5.5 不能關推理，用最低強度
+  "askReasoning": ["effort": "low"],
+  "askTimeoutSec": 25.0,
   // 按住超過這個毫秒數再放開＝按著講；短按＝切換（按一下開始、再按一下結束）
   "holdThresholdMs": 1000,
   "minHoldMs": 300,
@@ -42,6 +58,25 @@ let defaultConfig: [String: Any] = [
   "speculativePauseSec": 0.6,
   "transcribeTimeoutSec": 20.0,
   "sounds": true,
+  // 音訊：指定麥克風（空字串＝系統預設）、錄音時把喇叭靜音
+  "micUID": "",
+  "muteWhileDictating": true,
+  // 一般：顯示在 Dock
+  "showInDock": false,
+  // 輸出：智慧排版（條列、換行）、自動標點、英文拼寫（us／uk）
+  "smartFormatting": true,
+  "autoPunctuation": true,
+  "englishVariant": "us",
+  // 隱私：這些 app 在最前面時，只送 app 名稱，不讀游標前後、選取的字與視窗標題
+  "noContextApps": ["com.1password.1password", "com.agilebits.onepassword7", "com.bitwarden.desktop",
+                    "com.apple.keychainaccess", "com.apple.Passwords"],
+  // 歷史保存天數（-1 永久、0 不保存）、錄音保存天數（給重試與另存用）
+  "historyDays": 30,
+  "audioDays": 7,
+  // 自動學詞：貼上後使用者改掉的專有名詞自動加進詞彙表
+  "autoLearn": true,
+  // 寫作風格樣本：隨便問與整理時參考用詞與語氣
+  "styleSample": "",
   // Typeless 詞庫同步：實驗功能，預設關閉
   "typelessSync": false,
   // 首次啟動引導是否已完成
@@ -85,6 +120,9 @@ final class Config {
     self.user = user
     for (k, v) in user { dict[k] = v }
   }
+
+  // 只在這次執行中覆蓋設定，不寫檔（終端機測試用）
+  func override(_ k: String, _ v: Any) { dict[k] = v }
 
   // 改一個設定並寫回 config.json（設定視窗用）
   func set(_ k: String, _ v: Any?) {
@@ -296,6 +334,8 @@ func readContext() -> Context {
   ctx.app = front.localizedName ?? ""
   ctx.bundle = front.bundleIdentifier ?? ""
   ctx.pid = front.processIdentifier
+  // 隱私清單裡的 app：只留 app 名稱
+  if config.strings("noContextApps").contains(ctx.bundle) { return ctx }
   let appEl = AXUIElementCreateApplication(front.processIdentifier)
   AXUIElementSetMessagingTimeout(appEl, 0.3)
   var win: CFTypeRef?
@@ -340,6 +380,7 @@ final class Recorder {
   func start() throws {
     lock.lock(); pcm = Data(); peak = 0; lock.unlock()
     let engine = AVAudioEngine()
+    applyInputDevice(engine, selectedInputDevice())
     let input = engine.inputNode
     let inFormat = input.outputFormat(forBus: 0)
     guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else { throw NSError(domain: "HAUS Type", code: 1, userInfo: [NSLocalizedDescriptionKey: "麥克風開不起來（沒有輸入裝置或沒有權限）"]) }
@@ -449,8 +490,26 @@ func send(_ req: URLRequest) async throws -> [String: Any] {
   return obj
 }
 
-// 轉寫：OpenAI 官方走 multipart，其他（OpenRouter）走 JSON + base64
+// 本機辨識退回雲端時的原因（貼上後提示一次）
+var lastTranscribeFallback: String?
+
+// 轉寫：本機模式先用 Breeze，失敗才退回雲端；雲端是 OpenAI 官方走 multipart，其他（OpenRouter）走 JSON + base64
 func transcribe(_ wavData: Data, key: String) async throws -> String {
+  if config.string("transcribeEngine") == "local" {
+    do {
+      let t = try await LocalASR.shared.transcribe(wavData)
+      lastTranscribeFallback = nil
+      return (t.applyingTransform(StringTransform("Hans-Hant"), reverse: false) ?? t).trimmingCharacters(in: .whitespacesAndNewlines)
+    } catch {
+      if Task.isCancelled { throw error }
+      log("本機辨識失敗，改用雲端：\(error.localizedDescription)")
+      lastTranscribeFallback = error.localizedDescription
+    }
+  }
+  return try await transcribeCloud(wavData, key: key)
+}
+
+func transcribeCloud(_ wavData: Data, key: String) async throws -> String {
   let urlString = config.string("transcribeURL")
   let model = config.string("transcribeModel")
   let lang = config.string("language")
@@ -483,7 +542,9 @@ func transcribe(_ wavData: Data, key: String) async throws -> String {
     obj = try await postJSON(urlString, body, key: key, timeout: timeout)
   }
   guard let text = obj["text"] as? String else { throw APIError(message: "轉寫回應沒有 text") }
-  return text.trimmingCharacters(in: .whitespacesAndNewlines)
+  // 轉寫有時回簡體字：一律轉成繁體（歷史紀錄、答案視窗顯示的原稿也是繁體）
+  let trad = lang.hasPrefix("zh") ? (text.applyingTransform(StringTransform("Hans-Hant"), reverse: false) ?? text) : text
+  return trad.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 struct CleanResult {
@@ -493,8 +554,19 @@ struct CleanResult {
 
 func tag(_ name: String, _ value: String) -> String { value.isEmpty ? "" : "<\(name)>\(value)</\(name)>\n" }
 
+// 設定裡的輸出選項，附在整理規則後面
+func outputPreferences() -> String {
+  var lines: [String] = []
+  if !config.bool("smartFormatting") { lines.append("不要排成條列，也不要自己換行；照講的順序輸出成一段（使用者說「換行」時才換行）。") }
+  if !config.bool("autoPunctuation") { lines.append("不要補標點符號，只在原本停頓的地方用一個空白隔開。") }
+  lines.append(config.string("englishVariant") == "uk" ? "英文一律用英式拼寫（colour、organise）。" : "英文一律用美式拼寫（color、organize）。")
+  let sample = config.string("styleSample").trimmingCharacters(in: .whitespacesAndNewlines)
+  if !sample.isEmpty { lines.append("使用者平常的寫法如下，用詞與語氣盡量貼近，但不要改動原稿的內容：\n<style_sample>\(sample.prefix(1500))</style_sample>") }
+  return "\n\n使用者的輸出偏好（優先於上面的規則）：\n" + lines.map { "- " + $0 }.joined(separator: "\n")
+}
+
 func buildPrompt(_ transcript: String, _ ctx: Context) -> (String, String) {
-  let system = "\(cleanupRules())\n\n<vocabulary>\n\(vocabulary().joined(separator: "\n"))\n</vocabulary>"
+  let system = "\(cleanupRules())\(outputPreferences())\n\n<vocabulary>\n\(vocabulary().joined(separator: "\n"))\n</vocabulary>"
   let appName = ctx.app.isEmpty ? "" : "\(ctx.app)（\(ctx.bundle)，只是使用者正在打字的地方，不是原稿講的東西）"
   let user = [
     tag("app", appName), tag("window", ctx.window), "<field>\(ctx.role)</field>\n",
@@ -506,8 +578,14 @@ func buildPrompt(_ transcript: String, _ ctx: Context) -> (String, String) {
 }
 
 // 整理：回傳 nil 代表模型回的格式不對，呼叫端改貼原稿
-func cleanup(_ transcript: String, _ ctx: Context, key: String) async throws -> CleanResult? {
-  let (system, user) = buildPrompt(transcript, ctx)
+func cleanup(_ transcript: String, _ ctx: Context, key: String, mode: Mode = .dictate) async throws -> CleanResult? {
+  var (system, user) = buildPrompt(transcript, ctx)
+  if mode == .translate {
+    // 翻譯指示放在系統訊息最前面與使用者訊息最後面，壓過「保持原稿語言」那條
+    let t = currentTranslateTarget()
+    system = "【本次是翻譯模式：輸出一律是\(t)】\n\n" + system + translateInstruction(t)
+    user += "\n<task>把 <transcript> 整理後翻成\(t)，只輸出\(t)譯文</task>"
+  }
   var body: [String: Any] = [
     "model": config.string("cleanupModel"),
     "max_tokens": 4000,
@@ -521,12 +599,12 @@ func cleanup(_ transcript: String, _ ctx: Context, key: String) async throws -> 
   return parseResult(content)
 }
 
-func parseResult(_ raw: String) -> CleanResult? {
+func parseResult(_ raw: String, allowed: [String] = ["insert", "replace_selection"]) -> CleanResult? {
   guard let start = raw.firstIndex(of: "{"), let end = raw.lastIndex(of: "}") else { return nil }
   guard let data = String(raw[start...end]).data(using: .utf8),
         let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
         let mode = obj["mode"] as? String, let text = obj["text"] as? String,
-        ["insert", "replace_selection"].contains(mode) else { return nil }
+        allowed.contains(mode) else { return nil }
   if mode == "replace_selection" && text.trimmingCharacters(in: .whitespaces).isEmpty { return nil }
   return CleanResult(mode: mode, text: text)
 }
@@ -608,23 +686,35 @@ func parseCombo(_ s: String) -> Combo? {
 }
 
 final class Hotkey {
-  var onDown: (() -> Void)?
+  // onDown(模式)：按下某個模式的快捷鍵；onModeChange：按著 Fn 時又按了 Shift／Space，把這次錄音改成別的模式
+  var onDown: ((Mode) -> Void)?
   var onUp: (() -> Void)?
+  var onModeChange: ((Mode) -> Void)?
   var onCancel: (() -> Void)?
   var onEscape: (() -> Void)?
   var isRecording: (() -> Bool)?
   private var tap: CFMachPort?
   var isRunning: Bool { tap != nil }
-  private var useFn = false
-  private var useMouse2 = false
-  private var combos: [Combo] = []
+  // Fn 系列：fn（單按）、fn+shift、fn+space 各對應哪個模式
+  private var fnModes: [String: Mode] = [:]
+  private var mouse2Mode: Mode?
+  private var combos: [(Combo, Mode)] = []
   private var fnDown = false
+  private var fnPressStopped = false   // 這次按 Fn 是用來「結束」錄音，放開前的 Shift／Space 都不算新的開始
+  private var fnPressStarted = false   // 這次按 Fn 已經開始錄音
+  private var spaceSwallowed = false
   private var activeCombo: Int64?
 
-  func configure(_ specs: [String]) {
-    useFn = specs.contains { $0.lowercased() == "fn" }
-    useMouse2 = specs.contains { $0.lowercased() == "mouse2" }
-    combos = specs.compactMap(parseCombo)
+  func configure(dictate: [String], translate: [String], ask: [String]) {
+    fnModes = [:]; mouse2Mode = nil; combos = []
+    for (specs, mode) in [(dictate, Mode.dictate), (translate, .translate), (ask, .ask)] {
+      for raw in specs {
+        let spec = raw.lowercased()
+        if spec == "fn" || spec == "fn+shift" || spec == "fn+space" { fnModes[spec] = mode; continue }
+        if spec == "mouse2" { mouse2Mode = mode; continue }
+        if let c = parseCombo(spec) { combos.append((c, mode)) }
+      }
+    }
   }
 
   // 需要「輔助使用」權限；沒權限回 false
@@ -645,6 +735,15 @@ final class Hotkey {
     return true
   }
 
+  private func fire(_ f: @escaping () -> Void) { DispatchQueue.main.async(execute: f) }
+
+  // 按著 Fn 時又按了 Shift 或 Space：還沒開始就以該模式開始，已經開始就改模式
+  private func fnCombo(_ spec: String) {
+    guard let mode = fnModes[spec], !fnPressStopped else { return }
+    if fnPressStarted { fire { self.onModeChange?(mode) } }
+    else { fnPressStarted = true; fire { self.onDown?(mode) } }
+  }
+
   private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
     // 系統因為逾時把 tap 停掉時重新打開
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
@@ -652,41 +751,68 @@ final class Hotkey {
       return Unmanaged.passUnretained(event)
     }
     // 滑鼠中鍵（Mouse 2，buttonNumber 2）：吃掉，不讓前景 app 收到
-    if useMouse2, type == .otherMouseDown || type == .otherMouseUp, event.getIntegerValueField(.mouseEventButtonNumber) == 2 {
+    if let mode = mouse2Mode, type == .otherMouseDown || type == .otherMouseUp, event.getIntegerValueField(.mouseEventButtonNumber) == 2 {
       let down = type == .otherMouseDown
-      DispatchQueue.main.async { down ? self.onDown?() : self.onUp?() }
+      fire { down ? self.onDown?(mode) : self.onUp?() }
       return nil
     }
     let code = event.getIntegerValueField(.keyboardEventKeycode)
-    if type == .flagsChanged, useFn, code == 63 || code == 179 {
+    let usesFn = !fnModes.isEmpty
+    // Fn（地球鍵）按下與放開
+    if type == .flagsChanged, usesFn, code == 63 || code == 179 {
       let down = event.flags.contains(.maskSecondaryFn)
-      log("Fn flagsChanged code=\(code) down=\(down)")
       if down != fnDown {
         fnDown = down
-        DispatchQueue.main.async { down ? self.onDown?() : self.onUp?() }
+        if down {
+          let wasRecording = isRecording?() ?? false
+          fnPressStopped = wasRecording
+          fnPressStarted = false
+          spaceSwallowed = false
+          if wasRecording {
+            fire { self.onDown?(.dictate) }   // 錄音中再按一次：結束（模式由主程式沿用這次錄音的）
+          } else if event.flags.contains(.maskShift), fnModes["fn+shift"] != nil {
+            fnCombo("fn+shift")
+          } else if let m = fnModes["fn"] {
+            fnPressStarted = true
+            fire { self.onDown?(m) }
+          }
+        } else {
+          fire { self.onUp?() }
+        }
       }
+      return Unmanaged.passUnretained(event)
+    }
+    // 按著 Fn 時按下 Shift（左右都算）
+    if type == .flagsChanged, fnDown, code == 56 || code == 60, event.flags.contains(.maskShift) {
+      fnCombo("fn+shift")
       return Unmanaged.passUnretained(event)
     }
     // 錄音中按 Esc：取消這段（吃掉這個 Esc）
     if type == .keyDown, code == 53, isRecording?() == true {
-      DispatchQueue.main.async { self.onEscape?() }
+      fire { self.onEscape?() }
       return nil
     }
+    // 按著 Fn 時按 Space：隨便問（吃掉空白，不打進輸入框）
+    if fnDown, code == 49, type == .keyDown || type == .keyUp, fnModes["fn+space"] != nil || fnPressStopped {
+      if type == .keyDown { spaceSwallowed = true; fnCombo("fn+space") }
+      return nil
+    }
+    if type == .keyUp, code == 49, spaceSwallowed { spaceSwallowed = false; return nil }
     if type == .keyDown {
       // 按著 Fn 又按了別的鍵（Fn+F1、Fn+方向鍵）：當成一般組合鍵，取消錄音
-      if fnDown { DispatchQueue.main.async { self.onCancel?() } }
+      if fnDown && fnPressStarted { fire { self.onCancel?() } }
       let flags = event.flags.intersection(modMask)
-      if let c = combos.first(where: { $0.key == code && $0.flags == flags }) {
+      if let (c, mode) = combos.first(where: { $0.0.key == code && $0.0.flags == flags }) {
         if activeCombo == nil {
           activeCombo = c.key
-          DispatchQueue.main.async { self.onDown?() }
+          fire { self.onDown?(mode) }
         }
         return nil // 吃掉，不讓前景 app 收到
       }
     }
     if type == .keyUp, let active = activeCombo, active == code {
       activeCombo = nil
-      DispatchQueue.main.async { self.onUp?() }
+      fire { self.onUp?() }
       return nil
     }
     return Unmanaged.passUnretained(event)
@@ -705,7 +831,7 @@ struct Outcome {
 }
 
 // 轉寫＋整理。整理失敗、逾時或格式不對就用原稿
-func compute(_ audio: Data, ctx: Context) async -> Outcome {
+func compute(_ audio: Data, ctx: Context, mode: Mode = .dictate) async -> Outcome {
   var o = Outcome()
   guard let key = apiKey() else { o.error = "找不到 OpenRouter 金鑰"; return o }
   let t0 = Date()
@@ -720,9 +846,23 @@ func compute(_ audio: Data, ctx: Context) async -> Outcome {
   let t1 = Date()
   o.text = o.raw
   o.note = "原稿"
-  if config.bool("cleanup"), !o.raw.isEmpty, !Task.isCancelled {
+  // 隨便問：交給 ask()，可能回答案（answer）而不是要貼上的字
+  if mode == .ask, !o.raw.isEmpty, !Task.isCancelled {
     do {
-      if let r = try await cleanup(o.raw, ctx, key: key) {
+      if let r = try await ask(o.raw, ctx, key: key) { o.text = r.text; o.note = r.mode }
+      else { o.error = "提問失敗：模型回的格式不對" }
+    } catch {
+      if !Task.isCancelled { log("提問失敗：\(error.localizedDescription)") }
+      o.error = "提問失敗：\(error.localizedDescription.prefix(60))"
+    }
+    o.msT = Int(t1.timeIntervalSince(t0) * 1000)
+    o.msC = Int(Date().timeIntervalSince(t1) * 1000)
+    return o
+  }
+  // 翻譯一定要經過模型，就算關了整理也一樣
+  if config.bool("cleanup") || mode == .translate, !o.raw.isEmpty, !Task.isCancelled {
+    do {
+      if let r = try await cleanup(o.raw, ctx, key: key, mode: mode) {
         o.text = r.text
         o.note = r.mode
         if r.mode == "insert", r.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !onlyFiller(o.raw) {
@@ -761,31 +901,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var lastVoiceAt = Date.distantPast
   private var voiceSinceSnap = false
   private var sessionPeak: Float = 0
-  private var spec: (at: Date, task: Task<Outcome, Never>)?
+  private var spec: (at: Date, mode: Mode, task: Task<Outcome, Never>)?
+  private var mode: Mode = .dictate
   // 最後一段被取消的錄音，讓「取消」可以照樣送出
-  private var cancelled: (audio: Data, seconds: Double, ctx: Context)?
+  private var cancelled: (audio: Data, seconds: Double, ctx: Context, mode: Mode)?
 
   func applicationDidFinishLaunching(_ note: Notification) {
     ensureHome()
     status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     setIcon("mic")
     buildMenu()
+    OutputMute.recoverIfNeeded()
+    if config.string("transcribeEngine") == "local" { LocalASR.shared.start() }
+    DispatchQueue.global(qos: .utility).async { HistoryStore.prune() }
+    Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { _ in DispatchQueue.global(qos: .utility).async { HistoryStore.prune() } }
+    applyDockPolicy()
     let trusted = AXIsProcessTrusted()
     // 設定視窗改了東西：重新套用快捷鍵、重建選單
     NotificationCenter.default.addObserver(forName: .yuConfigChanged, object: nil, queue: .main) { [weak self] _ in
       guard let self else { return }
-      self.hotkey.configure(config.strings("hotkeys"))
+      self.configureHotkeys()
       self.buildMenu()
+      self.applyDockPolicy()
+      if config.string("transcribeEngine") == "local" { LocalASR.shared.start() } else { LocalASR.shared.stop() }
       if apiKey() != nil, self.statusLine.title.contains("金鑰") { self.setStatus("待命", icon: "mic") }
       self.autoPull()
     }
     NotificationCenter.default.addObserver(forName: .yuOpenVocabFile, object: nil, queue: .main) { [weak self] _ in self?.openVocab() }
-    hotkey.configure(config.strings("hotkeys"))
+    configureHotkeys()
     // 跟 Typeless 一樣：按一下開始、再按一下結束；按住超過 holdThresholdMs 再放開也結束（按著講）
-    hotkey.onDown = { [weak self] in
+    hotkey.onDown = { [weak self] mode in
       guard let self else { return }
-      self.recording ? self.stopRecording() : self.startRecording()
+      self.recording ? self.stopRecording() : self.startRecording(mode)
     }
+    hotkey.onModeChange = { [weak self] mode in self?.setMode(mode) }
     hotkey.onUp = { [weak self] in
       guard let self, self.recording else { return }
       if Date().timeIntervalSince(self.downAt) * 1000 >= config.double("holdThresholdMs") { self.stopRecording() }
@@ -829,8 +978,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     })
   }
 
+  @objc private func pickTarget(_ sender: NSMenuItem) {
+    config.set("translateTarget", sender.title)
+    buildMenu()
+  }
+
   @objc func showSettings() { Windows.show(&Windows.settings, title: "HAUS Type 設定", view: SettingsView()) }
-  @objc func showHistory() { Windows.show(&Windows.history, title: "HAUS Type 歷史紀錄", view: HistoryView()) }
+  @objc func showHistory() { Windows.show(&Windows.history, title: "HAUS Type 總覽與歷史紀錄", view: HistoryView()) }
 
   private func buildMenu() {
     let menu = NSMenu()
@@ -841,8 +995,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     menu.addItem(item("貼上上一段", #selector(pasteLast)))
     menu.addItem(item("貼上上一段原文（未整理）", #selector(pasteLastRaw)))
     menu.addItem(item("複製上一段", #selector(copyLast)))
-    menu.addItem(item("歷史紀錄…", #selector(showHistory)))
+    menu.addItem(item("總覽與歷史紀錄…", #selector(showHistory)))
     menu.addItem(.separator())
+    // 翻譯目標：設定裡勾了幾種就列幾種，打勾的是目前用的
+    let tmenu = NSMenu()
+    for lang in config.strings("translateTargets") {
+      let it = item(lang, #selector(pickTarget(_:)))
+      it.state = lang == currentTranslateTarget() ? .on : .off
+      tmenu.addItem(it)
+    }
+    let tItem = NSMenuItem(title: "翻譯目標：\(currentTranslateTarget())", action: nil, keyEquivalent: "")
+    tItem.submenu = tmenu
+    menu.addItem(tItem)
     let settings = item("設定…", #selector(showSettings))
     settings.keyEquivalent = ","
     menu.addItem(settings)
@@ -888,8 +1052,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     s.stop(); s.play()
   }
 
-  private func startRecording() {
+  // 顯示在 Dock：regular 會出現在 Dock 與 Cmd+Tab，accessory 只在選單列
+  func applyDockPolicy() {
+    NSApp.setActivationPolicy(config.bool("showInDock") ? .regular : .accessory)
+  }
+
+  // 三種模式的快捷鍵一起套用
+  func configureHotkeys() {
+    hotkey.configure(dictate: config.strings("hotkeys"), translate: config.strings("translateHotkeys"), ask: config.strings("askHotkeys"))
+  }
+
+  // 錄音中改模式（按著 Fn 又按 Shift／Space）
+  private func setMode(_ m: Mode) {
+    guard recording, m != mode else { return }
+    mode = m
+    spec?.task.cancel(); spec = nil
+    hud.setMode(m == .dictate ? "" : m == .translate ? "翻譯 → \(currentTranslateTarget())" : "提問")
+    log("切換模式：\(m.label)")
+  }
+
+  private func startRecording(_ m: Mode = .dictate) {
     guard !recording else { return }
+    mode = m
     downAt = Date()
     ctx = Context()
     do {
@@ -902,9 +1086,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     recording = true
     lastVoiceAt = .distantPast; voiceSinceSnap = false; sessionPeak = 0
     spec?.task.cancel(); spec = nil
-    log("開始錄音")
-    setStatus("錄音中", icon: "mic.fill")
-    hud.recording()
+    log("開始錄音（\(m.label)）")
+    setStatus("錄音中（\(m.label)）", icon: "mic.fill")
+    // 開始提示音播完再靜音喇叭
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { if self.recording { OutputMute.begin() } }
+    hud.recording(label: m == .dictate ? "" : m == .translate ? "翻譯 → \(currentTranslateTarget())" : "提問")
     sound(Tone.start)
     if let key = apiKey() { Task.detached { await warmUp(key: key) } }
     // AX 讀取可能卡一下，放背景做
@@ -916,8 +1102,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     log("取消錄音")
     recording = false
     let (audio, seconds) = recorder.stop()
+    OutputMute.end()
     spec?.task.cancel(); spec = nil
-    cancelled = (audio, seconds, ctx)
+    cancelled = (audio, seconds, ctx, mode)
+    if seconds * 1000 >= config.double("minHoldMs") {
+      let id = HistoryStore.newID()
+      var e: [String: Any] = ["id": id, "ts": ISO8601DateFormatter().string(from: Date()), "app": ctx.bundle, "seconds": seconds,
+                              "raw": "", "text": "", "kind": mode.rawValue, "status": "cancelled"]
+      if let a = HistoryStore.saveAudio(audio, id: id) { e["audio"] = a }
+      HistoryStore.append(e)
+    }
     setStatus("待命", icon: "mic")
     hud.cancelled()
     sound(Tone.cancel)
@@ -930,7 +1124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     busy += 1
     hud.processing()
     setStatus("辨識中", icon: "ellipsis.circle")
-    Task { await self.process(c.audio, seconds: c.seconds, ctx: c.ctx) }
+    Task { await self.process(c.audio, seconds: c.seconds, ctx: c.ctx, mode: c.mode) }
   }
 
   // 每一塊聲音進來：更新聲波、判斷有沒有在講話；講完停頓夠久就先送出目前的聲音
@@ -947,9 +1141,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       voiceSinceSnap = false
       let (audio, secs) = recorder.snapshot()
       guard secs * 1000 >= config.double("minHoldMs") else { return }
-      let ctx = self.ctx
+      let ctx = self.ctx, m = self.mode
       spec?.task.cancel()
-      spec = (now, Task.detached { await compute(audio, ctx: ctx) })
+      spec = (now, m, Task.detached { await compute(audio, ctx: ctx, mode: m) })
       log("預先轉寫：\(String(format: "%.1f", secs)) 秒")
     }
   }
@@ -959,6 +1153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     recording = false
     let held = Date().timeIntervalSince(downAt) * 1000
     let (audio, seconds) = recorder.stop()
+    OutputMute.end()
     log("停止錄音：按住 \(Int(held)) ms，收到聲音 \(String(format: "%.2f", seconds)) 秒，最大音量 \(String(format: "%.3f", recorder.peak))")
     let pending = spec
     spec = nil
@@ -966,48 +1161,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if seconds * 1000 < config.double("minHoldMs") { pending?.task.cancel(); setStatus("待命", icon: "mic"); hud.hide(); return }
     sound(Tone.stop)
     hud.processing()
-    let ctx = self.ctx
+    let ctx = self.ctx, m = self.mode
+    let id = HistoryStore.newID()
+    let audioName = HistoryStore.saveAudio(audio, id: id)
     busy += 1
-    setStatus("辨識中", icon: "ellipsis.circle")
-    // 預先轉寫之後沒有再講話：直接用預先算好的結果
-    if let p = pending, lastVoiceAt <= p.at {
+    setStatus(m == .ask ? "思考中" : "辨識中", icon: "ellipsis.circle")
+    // 預先轉寫之後沒有再講話、模式也沒變：直接用預先算好的結果
+    if let p = pending, lastVoiceAt <= p.at, p.mode == m {
       let t = Date()
       Task {
         let o = await p.task.value
-        await self.deliver(o, seconds: seconds, ctx: ctx, waitMs: Int(Date().timeIntervalSince(t) * 1000), hit: true)
+        await self.deliver(o, seconds: seconds, ctx: ctx, waitMs: Int(Date().timeIntervalSince(t) * 1000), hit: true, mode: m, id: id, audio: audioName)
       }
       return
     }
     pending?.task.cancel()
-    Task { await self.process(audio, seconds: seconds, ctx: ctx) }
+    Task { await self.process(audio, seconds: seconds, ctx: ctx, mode: m, id: id, audioName: audioName) }
   }
 
-  private func process(_ audio: Data, seconds: Double, ctx: Context) async {
+  private func process(_ audio: Data, seconds: Double, ctx: Context, mode: Mode = .dictate, id: String = HistoryStore.newID(), audioName: String? = nil) async {
     let t = Date()
-    let o = await compute(audio, ctx: ctx)
-    await deliver(o, seconds: seconds, ctx: ctx, waitMs: Int(Date().timeIntervalSince(t) * 1000), hit: false)
+    let o = await compute(audio, ctx: ctx, mode: mode)
+    await deliver(o, seconds: seconds, ctx: ctx, waitMs: Int(Date().timeIntervalSince(t) * 1000), hit: false, mode: mode, id: id, audio: audioName)
   }
 
   // 把結果貼上並更新畫面；waitMs＝放開後實際等了多久
-  private func deliver(_ o: Outcome, seconds: Double, ctx: Context, waitMs: Int, hit: Bool) async {
+  private func deliver(_ o: Outcome, seconds: Double, ctx: Context, waitMs: Int, hit: Bool, mode: Mode = .dictate,
+                       id: String = HistoryStore.newID(), audio: String? = nil) async {
     await MainActor.run {
       self.busy -= 1
+      let empty = o.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      let status = o.error != nil ? "error" : empty ? "empty" : (o.note == "answer" ? "answer" : "ok")
+      var entry: [String: Any] = ["id": id, "ts": ISO8601DateFormatter().string(from: Date()), "app": ctx.bundle, "seconds": seconds,
+                                  "raw": o.raw, "text": o.text, "mode": o.note, "kind": mode.rawValue, "status": status,
+                                  "ms_transcribe": o.msT, "ms_cleanup": o.msC, "wait_ms": waitMs, "speculative": hit]
+      if let audio { entry["audio"] = audio }
+      if let err = o.error { entry["error"] = err }
+      // 這段用哪個辨識引擎（本機失敗退回雲端記 local→cloud）
+      let eng = config.string("transcribeEngine")
+      entry["engine"] = eng == "local" && lastTranscribeFallback != nil ? "local→cloud" : eng
+      HistoryStore.append(entry)
       if let err = o.error {
         self.setStatus(err, icon: "exclamationmark.triangle")
         self.hud.flash(err.replacingOccurrences(of: "轉寫失敗：", with: ""), seconds: 3.5)
         return
       }
-      appendHistory(["ts": ISO8601DateFormatter().string(from: Date()), "app": ctx.bundle, "seconds": seconds,
-                     "raw": o.raw, "text": o.text, "mode": o.note, "ms_transcribe": o.msT, "ms_cleanup": o.msC,
-                     "wait_ms": waitMs, "speculative": hit])
       log("貼上：等待 \(waitMs) ms（\(hit ? "預先轉寫命中" : "一般")）")
       self.last = Last(raw: o.raw, text: o.text)
       if o.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         self.setStatus("待命（沒有內容）", icon: "mic"); self.hud.flash("沒有聽到內容"); return
       }
+      // 隨便問的回答：顯示在答案視窗，不直接貼上
+      if o.note == "answer" {
+        self.hud.hide()
+        Answers.show(question: o.raw, answer: o.text, insertTo: ctx.pid)
+        self.setStatus("已回答（等待 \(waitMs) ms）", icon: "checkmark")
+        return
+      }
       // 使用者已經切到別的 app 時，照樣貼到現在的最前面；錄音當下的 app 只拿來判斷語氣
       paste(o.text)
+      Learner.watch(pid: ctx.pid, pasted: o.text)
       self.hud.hide()
+      if let why = lastTranscribeFallback {
+        lastTranscribeFallback = nil
+        self.hud.flash("本機辨識無法使用，這次改用雲端：\(why.prefix(30))", seconds: 3)
+      }
       self.setStatus("已貼上（等待 \(waitMs) ms\(hit ? "，預先轉寫" : "")，\(o.note)）", icon: "checkmark")
       DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
         if !self.recording && self.busy == 0 { self.setIcon("mic") }
@@ -1073,7 +1291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
   @objc private func reloadConfig() {
     config.reload()
-    hotkey.configure(config.strings("hotkeys"))
+    configureHotkeys()
     setStatus("設定已重新載入", icon: "mic")
   }
   @objc private func toggleLogin() {
@@ -1082,7 +1300,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     } catch { log("登入項目設定失敗：\(error)") }
     loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
   }
-  @objc private func quit() { NSApp.terminate(nil) }
+  @objc private func quit() {
+    LocalASR.shared.stop(); NSApp.terminate(nil) }
 }
 
 // 重新啟動自己（取得輔助使用權限後 macOS 要重開程式才生效）
@@ -1095,6 +1314,10 @@ func relaunch() {
 }
 
 func appendHistory(_ entry: [String: Any]) {
+  HistoryStore.append(entry)
+}
+
+func appendHistoryLegacy(_ entry: [String: Any]) {
   guard let data = try? JSONSerialization.data(withJSONObject: entry), var line = String(data: data, encoding: .utf8) else { return }
   line += "\n"
   if let h = try? FileHandle(forWritingTo: historyURL) {
@@ -1110,6 +1333,7 @@ func appendHistory(_ entry: [String: Any]) {
 func runTest(_ args: [String]) -> Int32 {
   ensureHome()
   func opt(_ name: String) -> String? { args.firstIndex(of: name).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+  if let e = opt("--engine") { config.override("transcribeEngine", e) }
   guard let key = apiKey() else { print("找不到金鑰"); return 1 }
   var ctx = Context()
   ctx.bundle = opt("--bundle") ?? ""
@@ -1131,7 +1355,8 @@ func runTest(_ args: [String]) -> Int32 {
         }
         if !args.contains("--no-cleanup") {
           let t1 = Date()
-          let r = try await cleanup(raw, ctx, key: key)
+          let m = Mode(rawValue: opt("--mode") ?? "dictate") ?? .dictate
+          let r = m == .ask ? try await ask(raw, ctx, key: key) : try await cleanup(raw, ctx, key: key, mode: m)
           print("整理（\(Int(Date().timeIntervalSince(t1) * 1000)) ms，\(r?.mode ?? "格式不對")）：\(r?.text ?? "")")
         }
       }
@@ -1145,6 +1370,49 @@ func runTest(_ args: [String]) -> Int32 {
 // MARK: - 進入點
 
 let args = CommandLine.arguments
+// 開發用：把設定視窗某一頁畫成圖檔檢查版面，YuVoice --render-settings 分頁編號 輸出.png
+if let i = args.firstIndex(of: "--render-settings"), i + 2 < args.count {
+  ensureHome()
+  _ = NSApplication.shared
+  // 分頁編號前加 h 是總覽與歷史視窗（例如 h0、h1）
+  let spec = args[i + 1]
+  let host: NSView
+  if spec.hasPrefix("h") {
+    let v = NSHostingView(rootView: HistoryView(tab: Int(spec.dropFirst()) ?? 0))
+    v.frame = NSRect(x: 0, y: 0, width: 680, height: 600); host = v
+  } else {
+    let v = NSHostingView(rootView: SettingsView(tab: Int(spec) ?? 0))
+    v.frame = NSRect(x: 0, y: 0, width: 600, height: 520); host = v
+  }
+  let win = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+  win.contentView = host
+  host.layoutSubtreeIfNeeded()
+  RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+  if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+    host.cacheDisplay(in: host.bounds, to: rep)
+    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 2]))
+  }
+  exit(0)
+}
+// 開發用：測自動學詞。--test-learn 改之前 改之後 貼上的字
+if let i = args.firstIndex(of: "--test-learn"), i + 3 < args.count {
+  ensureHome()
+  if let (o, n) = Learner.changedWord(before: args[i + 1], after: args[i + 2], pasted: args[i + 3]) {
+    print("偵測到：「\(o)」→「\(n)」")
+    if args.contains("--judge") {
+      let sem = DispatchSemaphore(value: 0)
+      Task.detached { await Learner.judge(old: o, new: n, sentence: args[i + 3]); sem.signal() }
+      sem.wait()
+    }
+  } else { print("沒有可學的修改") }
+  exit(0)
+}
+if args.contains("--categorize") {
+  ensureHome()
+  let sem = DispatchSemaphore(value: 0)
+  Task.detached { print("已分類 \(await autoCategorizeVocab()) 個"); sem.signal() }
+  sem.wait(); exit(0)
+}
 if args.contains("--sync-typeless") {
   ensureHome()
   let r = syncWithTypeless(writeCSV: true)

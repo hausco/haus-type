@@ -39,6 +39,8 @@ final class HUDView: NSView {
   var mode: Mode = .recording { didSet { needsDisplay = true } }
   var message = "" { didSet { needsDisplay = true } }
   var levels = [Float](repeating: 0, count: 18)
+  // 翻譯／提問模式時在 ✕ 右邊顯示模式文字（口述模式為空）
+  var modeLabel = "" { didSet { needsDisplay = true } }
   var onCancel: (() -> Void)?
   var onDone: (() -> Void)?
   var onUndo: (() -> Void)?
@@ -68,7 +70,14 @@ final class HUDView: NSView {
     case .recording:
       drawSymbol("xmark", at: NSPoint(x: 20, y: b.midY), size: 12)
       drawSymbol("checkmark", at: NSPoint(x: b.width - 20, y: b.midY), size: 13)
-      drawBars(in: NSRect(x: 40, y: 0, width: b.width - 80, height: b.height))
+      var barsX: CGFloat = 40
+      if !modeLabel.isEmpty {
+        let w = labelWidth(modeLabel)
+        drawText(modeLabel, in: NSRect(x: 40, y: 0, width: w, height: b.height),
+                 color: NSColor(calibratedRed: 0.30, green: 0.73, blue: 0.71, alpha: 1), align: .left)
+        barsX = 40 + w + 8
+      }
+      drawBars(in: NSRect(x: barsX, y: 0, width: b.width - barsX - 40, height: b.height))
     case .processing:
       drawDots(in: b)
     case .message:
@@ -78,6 +87,10 @@ final class HUDView: NSView {
       drawText("復原", in: NSRect(x: b.width - 62, y: 0, width: 46, height: b.height),
                color: NSColor(calibratedRed: 0.45, green: 0.62, blue: 1, alpha: 1))
     }
+  }
+
+  func labelWidth(_ s: String) -> CGFloat {
+    ceil((s as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13, weight: .medium)]).width)
   }
 
   private func drawSymbol(_ name: String, at p: NSPoint, size: CGFloat) {
@@ -174,10 +187,18 @@ final class HUD {
     }
   }
 
-  func recording() {
+  func recording(label: String = "") {
     view.levels = [Float](repeating: 0, count: view.levels.count)
+    view.modeLabel = label
     view.mode = .recording
-    show(width: 150)
+    show(width: label.isEmpty ? 150 : 150 + view.labelWidth(label) + 8)
+  }
+
+  // 錄音中改模式：更新文字並調整寬度
+  func setMode(_ label: String) {
+    guard view.mode == .recording else { return }
+    view.modeLabel = label
+    show(width: label.isEmpty ? 150 : 150 + view.labelWidth(label) + 8)
   }
 
   func level(_ v: Float) { if view.mode == .recording { view.push(v) } }
