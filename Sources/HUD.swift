@@ -49,6 +49,8 @@ final class HUDView: NSView {
   override var isFlipped: Bool { true }
   // macOS 26 以上由外層的 Liquid Glass 畫底，這裡只畫內容
   var drawsBackground = true
+  // 底色透明度：純黑模式 0.94；疊在 Liquid Glass 上時 0.6，讓玻璃的邊緣高光透出來
+  var backgroundAlpha: CGFloat = 0.94
   // 不用先點一下讓視窗取得焦點，第一下就能按
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -67,7 +69,7 @@ final class HUDView: NSView {
     // 單一膠囊底，裡面的元素都不加圓角底（遵守「圓角框不包圓角框」）
     let b = bounds
     if drawsBackground {
-      NSColor(white: 0.06, alpha: 0.94).setFill()
+      NSColor(white: 0.06, alpha: backgroundAlpha).setFill()
       NSBezierPath(roundedRect: b, xRadius: b.height / 2, yRadius: b.height / 2).fill()
     }
     switch mode {
@@ -176,14 +178,16 @@ final class HUD {
       // 深色 Liquid Glass 膠囊：玻璃材質加深色調，看起來仍是黑色膠囊
       let glass = NSGlassEffectView(frame: panel.contentLayoutRect)
       glass.cornerRadius = 17
-      glass.tintColor = NSColor(white: 0, alpha: 0.55)
+      glass.tintColor = NSColor(white: 0, alpha: 0.85)
       glass.autoresizingMask = [.width, .height]
-      view.drawsBackground = false
+      view.backgroundAlpha = 0.6
       view.frame = glass.bounds
       view.autoresizingMask = [.width, .height]
       glass.contentView = view
       panel.contentView = glass
       panel.appearance = NSAppearance(named: .darkAqua)
+      // 玻璃自己會畫陰影；視窗再加一層陰影會沿著膠囊外緣多出一圈黑邊
+      panel.hasShadow = false
     } else {
       panel.contentView = view
     }
