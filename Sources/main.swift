@@ -983,8 +983,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     buildMenu()
   }
 
-  @objc func showSettings() { Windows.show(&Windows.settings, title: "HAUS Type 設定", view: SettingsView()) }
-  @objc func showHistory() { Windows.show(&Windows.history, title: "HAUS Type 總覽與歷史紀錄", view: HistoryView()) }
+  @objc func showSettings() { Windows.show(&Windows.settings, title: "設定", view: SettingsView()) }
+  @objc func showHistory() { Windows.show(&Windows.history, title: "總覽與歷史紀錄", view: HistoryView()) }
 
   private func buildMenu() {
     let menu = NSMenu()

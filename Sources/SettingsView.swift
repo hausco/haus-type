@@ -297,94 +297,111 @@ func runningAppChoices() -> [(String, String)] {
     .sorted { $0.1 < $1.1 }
 }
 
+// 段落標題：粗體、上方留白，跟設定項目分開
+struct SectionHeader: View {
+  let text: String
+  init(_ t: String) { text = t }
+  var body: some View { Text(text).font(.headline).padding(.top, 14).padding(.bottom, 2) }
+}
+
+// 設定視窗：macOS 27「系統設定」式側邊欄。
+// 內容不用分組卡片（遵守「圓角框不包圓角框」），說明文字收進滑過才出現的提示。
+enum SettingsPage: String, CaseIterable, Identifiable {
+  case general = "一般", shortcuts = "快捷鍵", models = "辨識與模型", vocab = "字典", labs = "實驗功能", about = "關於"
+  var id: String { rawValue }
+  var symbol: String {
+    switch self {
+    case .general: return "gearshape"
+    case .shortcuts: return "keyboard"
+    case .models: return "waveform"
+    case .vocab: return "character.book.closed"
+    case .labs: return "flask"
+    case .about: return "info.circle"
+    }
+  }
+}
+
 struct SettingsView: View {
   @StateObject var m = SettingsModel()
   @StateObject var tester = MicTester()
   @State var addApp = ""
-  @State var tab: Int
-  init(tab: Int = 0) { _tab = State(initialValue: tab) }
-  private let tabs = ["一般", "快捷鍵", "金鑰與模型", "字典", "實驗功能", "關於"]
+  @State var page: SettingsPage?
+  init(tab: Int = 0) { _page = State(initialValue: SettingsPage.allCases[min(max(tab, 0), SettingsPage.allCases.count - 1)]) }
 
   var body: some View {
-    VStack(spacing: 0) {
-      // 分頁列：純文字＋底線（不用系統膠囊分頁，避免圓角框包圓角框）
-      HStack(spacing: 22) {
-        ForEach(tabs.indices, id: \.self) { i in
-          Button { tab = i } label: {
-            VStack(spacing: 5) {
-              Text(tabs[i]).fontWeight(tab == i ? .semibold : .regular)
-                .foregroundStyle(tab == i ? Color.primary : Color.secondary)
-              Rectangle().fill(tab == i ? Color.accentColor : Color.clear).frame(height: 2)
-            }
-            .fixedSize()
-          }
-          .buttonStyle(.plain)
-        }
+    NavigationSplitView {
+      // 側邊欄圖示不加彩色方塊底（選取的圓角底色裡再包一個圓角方塊會違反規則）
+      List(SettingsPage.allCases, selection: $page) { p in
+        Label(p.rawValue, systemImage: p.symbol).tag(p)
       }
-      .padding(.top, 12)
-      Divider()
+      .navigationSplitViewColumnWidth(min: 170, ideal: 180, max: 200)
+    } detail: {
       ScrollView {
-        switch tab {
-        case 0: general
-        case 1: shortcuts
-        case 2: keyAndModel
-        case 3: vocab
-        case 4: labs
-        default: about
+        Group {
+          switch page ?? .general {
+          case .general: general
+          case .shortcuts: shortcuts
+          case .models: keyAndModel
+          case .vocab: vocab
+          case .labs: labs
+          case .about: about
+          }
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
       }
-      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+      .navigationTitle((page ?? .general).rawValue)
     }
-    .frame(width: 600, height: 520)
+    .frame(width: 760, height: 560)
     .onDisappear { m.stopRecording(); tester.stop() }
   }
 
+  // 一般
   var general: some View {
     Form {
-      Section("音訊") {
+      Section(header: SectionHeader("音訊")) {
         Picker("麥克風", selection: $m.micUID) {
           Text("系統預設").tag("")
           ForEach(m.mics) { Text($0.name).tag($0.uid) }
         }.onChange(of: m.micUID) { config.set("micUID", m.micUID); if tester.running { tester.start() } }
-        HStack {
-          Button(tester.running ? "停止測試" : "測試麥克風") { tester.running ? tester.stop() : tester.start() }
-          // 音量條：平頭長條，不用圓角
-          GeometryReader { g in
-            ZStack(alignment: .leading) {
-              Rectangle().fill(Color.secondary.opacity(0.2))
-              Rectangle().fill(Color.accentColor).frame(width: g.size.width * CGFloat(min(1, sqrt(tester.level) * 1.2)))
-            }
-          }.frame(height: 6)
-        }
-        Toggle("錄音時把其他聲音靜音", isOn: $m.mute).onChange(of: m.mute) { config.set("muteWhileDictating", m.mute) }
-      }
-      Section("輸出") {
-        Toggle("智慧排版（講「第一、第二」排成條列、自動分段）", isOn: $m.smartFormatting)
-          .onChange(of: m.smartFormatting) { config.set("smartFormatting", m.smartFormatting) }
-        Toggle("自動補標點", isOn: $m.autoPunctuation).onChange(of: m.autoPunctuation) { config.set("autoPunctuation", m.autoPunctuation) }
-        Picker("英文拼寫", selection: $m.englishVariant) {
-          Text("美式（color）").tag("us")
-          Text("英式（colour）").tag("uk")
-        }.onChange(of: m.englishVariant) { config.set("englishVariant", m.englishVariant) }
-      }
-      Section("隱私：這些 app 在最前面時，不讀取游標附近的文字與視窗標題") {
-        ForEach(m.noContextApps, id: \.self) { b in
+        LabeledContent("輸入音量") {
           HStack {
-            Text(appName(b))
-            Spacer()
-            Button("移除") { m.removeNoContext(b) }
+            // 音量條：平頭長條，不用圓角
+            GeometryReader { g in
+              ZStack(alignment: .leading) {
+                Rectangle().fill(Color.secondary.opacity(0.2))
+                Rectangle().fill(Color.accentColor).frame(width: g.size.width * CGFloat(min(1, sqrt(tester.level) * 1.2)))
+              }
+            }.frame(height: 6)
+            Button(tester.running ? "停止" : "測試") { tester.running ? tester.stop() : tester.start() }
           }
         }
-        Picker("加入目前開著的 app", selection: $addApp) {
+        Toggle("錄音時靜音其他聲音", isOn: $m.mute).onChange(of: m.mute) { config.set("muteWhileDictating", m.mute) }
+      }
+      Section(header: SectionHeader("輸出")) {
+        Toggle("智慧排版", isOn: $m.smartFormatting).help("講「第一、第二」排成條列、自動分段")
+          .onChange(of: m.smartFormatting) { config.set("smartFormatting", m.smartFormatting) }
+        Toggle("自動標點", isOn: $m.autoPunctuation).onChange(of: m.autoPunctuation) { config.set("autoPunctuation", m.autoPunctuation) }
+        Picker("英文拼寫", selection: $m.englishVariant) {
+          Text("美式").tag("us")
+          Text("英式").tag("uk")
+        }.onChange(of: m.englishVariant) { config.set("englishVariant", m.englishVariant) }
+        Toggle("預先轉寫", isOn: $m.speculative).help("講完停頓時先送出，按結束後更快貼上")
+          .onChange(of: m.speculative) { config.set("speculative", m.speculative) }
+      }
+      Section {
+        ForEach(m.noContextApps, id: \.self) { b in
+          LabeledContent(appName(b)) { Button("移除") { m.removeNoContext(b) }.buttonStyle(.borderless) }
+        }
+        Picker("加入 App", selection: $addApp) {
           Text("選擇…").tag("")
           ForEach(runningAppChoices(), id: \.0) { Text($0.1).tag($0.0) }
         }.onChange(of: addApp) { m.addNoContext(addApp); addApp = "" }
+      } header: {
+        SectionHeader("不讀取上下文的 App").help("這些 App 在最前面時，只送 App 名稱，不讀游標附近的文字與視窗標題")
       }
-      Section("一般") {
-        Toggle("顯示在 Dock", isOn: $m.showInDock).onChange(of: m.showInDock) { config.set("showInDock", m.showInDock); m.changed() }
+      Section(header: SectionHeader("一般")) {
         Toggle("提示音", isOn: $m.sounds).onChange(of: m.sounds) { config.set("sounds", m.sounds) }
-        Toggle("預先轉寫（講完停頓時先送出，按結束後更快貼上）", isOn: $m.speculative)
-          .onChange(of: m.speculative) { config.set("speculative", m.speculative) }
+        Toggle("顯示在 Dock", isOn: $m.showInDock).onChange(of: m.showInDock) { config.set("showInDock", m.showInDock); m.changed() }
         Toggle("登入時開啟", isOn: $m.login).onChange(of: m.login) {
           do { if m.login { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() } }
           catch { log("登入項目設定失敗：\(error)") }
@@ -393,78 +410,85 @@ struct SettingsView: View {
       }
     }
     .formStyle(.columns)
-    .padding(20)
+    .toggleStyle(.switch)
+    .controlSize(.small)
+    .padding(24)
   }
 
-  // 快捷鍵頁：三種模式各一組
+  // 快捷鍵：三種模式各一組
   var shortcuts: some View {
     Form {
-      shortcutSection(.dictate, title: "口述：講的話整理後打進游標處", fnLabel: "Fn（🌐）")
-      shortcutSection(.translate, title: "翻譯：講中文，打出目標語言", fnLabel: "Fn＋Shift")
-      Section {
-        ForEach(translateLanguages, id: \.self) { lang in
-          Toggle(lang, isOn: Binding(get: { m.translateTargets.contains(lang) }, set: { m.toggleTarget(lang, $0) }))
-            .disabled(!m.translateTargets.contains(lang) && m.translateTargets.count >= 3)
+      shortcutSection(.dictate, fnLabel: "Fn（🌐）", help: "講的話整理後打進游標處")
+      shortcutSection(.translate, fnLabel: "Fn＋Shift", help: "講中文，打出目標語言")
+      Section(header: SectionHeader("翻譯目標")) {
+        // 多選選單：最多 3 種，選單列可以切換目前用哪一種
+        Menu(m.translateTargets.isEmpty ? "選擇語言" : m.translateTargets.joined(separator: "、")) {
+          ForEach(translateLanguages, id: \.self) { lang in
+            Toggle(lang, isOn: Binding(get: { m.translateTargets.contains(lang) }, set: { m.toggleTarget(lang, $0) }))
+              .disabled(!m.translateTargets.contains(lang) && m.translateTargets.count >= 3)
+          }
         }
-      } header: {
-        Text("翻譯目標（最多 3 種，選單列可以切換目前用哪一種）")
+        .fixedSize()
+        .help("最多 3 種，從選單列切換目前使用的語言")
       }
-      shortcutSection(.ask, title: "隨便問：選取字後改寫或提問，沒選取時幫你寫或回答", fnLabel: "Fn＋Space")
-      Text("按一下開始、再按一下結束；按住超過 1 秒放開也會結束；錄音中按 Esc 取消。用 Fn 前，請到「系統設定 → 鍵盤 → 按下 🌐 鍵時」選「不做任何事」。")
-        .font(.caption).foregroundStyle(.secondary)
+      shortcutSection(.ask, fnLabel: "Fn＋Space", help: "選取字後改寫或提問；沒選取時幫你寫或回答")
     }
     .formStyle(.columns)
-    .padding(20)
+    .toggleStyle(.switch)
+    .controlSize(.small)
+    .padding(24)
   }
 
-  func shortcutSection(_ mode: Mode, title: String, fnLabel: String) -> some View {
-    Section(title) {
+  func shortcutSection(_ mode: Mode, fnLabel: String, help: String) -> some View {
+    Section {
       Toggle(fnLabel, isOn: Binding(get: { m.fnOn[mode] ?? false }, set: { m.fnOn[mode] = $0; m.saveHotkeys(mode) }))
+        .help(mode == .dictate ? "系統設定 → 鍵盤 → 按下 🌐 鍵時，選「不做任何事」" : "")
       Toggle("滑鼠中鍵", isOn: Binding(get: { m.mouseOn[mode] ?? false }, set: { m.mouseOn[mode] = $0; m.saveHotkeys(mode) }))
-      HStack {
-        Text("自訂組合鍵")
-        Spacer()
+      LabeledContent("組合鍵") {
         let c = m.combos[mode] ?? ""
-        Text(m.recordingFor == mode ? "請按下組合鍵…（Esc 取消）" : (c.isEmpty ? "未設定" : comboLabel(c))).foregroundStyle(.secondary)
-        Button(m.recordingFor == mode ? "取消" : "錄製") { m.recordingFor == mode ? m.stopRecording() : m.startRecording(mode) }
-        if !c.isEmpty && m.recordingFor != mode { Button("清除") { m.combos[mode] = ""; m.saveHotkeys(mode) } }
+        HStack {
+          Text(m.recordingFor == mode ? "按下組合鍵…" : (c.isEmpty ? "未設定" : comboLabel(c))).foregroundStyle(.secondary)
+          Button(m.recordingFor == mode ? "取消" : "錄製") { m.recordingFor == mode ? m.stopRecording() : m.startRecording(mode) }
+          if !c.isEmpty && m.recordingFor != mode { Button("清除") { m.combos[mode] = ""; m.saveHotkeys(mode) } }
+        }
       }
+    } header: {
+      SectionHeader(mode.label == "提問" ? "隨便問" : mode.label).help(help)
     }
   }
 
+  // 辨識與模型
   var keyAndModel: some View {
     Form {
-      Section("OpenRouter 金鑰") {
-        HStack {
-          Text(m.hasKey ? "已設定（存在 macOS 鑰匙圈）" : "尚未設定")
-            .foregroundStyle(m.hasKey ? Color.secondary : Color.red)
-          Spacer()
-          if m.hasKey { Button("清除") { m.clearKey() } }
+      Section(header: SectionHeader("OpenRouter 金鑰")) {
+        LabeledContent("狀態") {
+          HStack {
+            Text(m.hasKey ? "已設定" : "尚未設定").foregroundStyle(m.hasKey ? Color.secondary : Color.red)
+            if m.hasKey { Button("清除") { m.clearKey() }.buttonStyle(.borderless) }
+          }
         }
-        SecureField("新金鑰", text: $m.keyInput, prompt: Text("貼上 sk-or- 開頭的金鑰"))
-        HStack {
-          Button(m.keyTesting ? "測試中…" : "測試並儲存") { m.testAndSaveKey() }.disabled(m.keyTesting)
-          Link("到 openrouter.ai 申請金鑰", destination: URL(string: "https://openrouter.ai/settings/keys")!)
-          Spacer()
+        SecureField("新金鑰", text: $m.keyInput, prompt: Text("sk-or-…"))
+        LabeledContent("") {
+          HStack {
+            Button(m.keyTesting ? "測試中…" : "測試並儲存") { m.testAndSaveKey() }.disabled(m.keyTesting)
+            Link("申請金鑰", destination: URL(string: "https://openrouter.ai/settings/keys")!)
+          }
         }
-        if !m.keyStatus.isEmpty { Text(m.keyStatus).font(.caption).foregroundStyle(.secondary) }
+        if !m.keyStatus.isEmpty { LabeledContent("") { Text(m.keyStatus).font(.caption).foregroundStyle(.secondary) } }
       }
-      Section("語音辨識") {
-        Picker("辨識引擎", selection: Binding(get: { m.engine }, set: { m.setEngine($0) })) {
-          Text("雲端（OpenRouter，準又快）").tag("cloud")
-          Text("本機（Breeze-ASR-25，錄音不離開這台 Mac）").tag("local")
+      Section(header: SectionHeader("語音辨識")) {
+        Picker("引擎", selection: Binding(get: { m.engine }, set: { m.setEngine($0) })) {
+          Text("雲端").tag("cloud")
+          Text("本機（錄音不離開這台 Mac）").tag("local")
         }
-        if m.engine == "local" {
-          Text(m.localStatus).font(.caption).foregroundStyle(.secondary)
-          Text("本機模式只有整理、翻譯、隨便問會把文字送到 OpenRouter；錄音本身不送出。需要 Apple Silicon 與約 3 GB 的模型，安裝方式見 README。")
-            .font(.caption).foregroundStyle(.secondary)
-        }
-      }
-      Section("模型") {
-        Picker("雲端語音轉文字", selection: $m.transcribeModel) {
+        .help("本機使用 Breeze-ASR-25；整理、翻譯、隨便問仍會把文字送到 OpenRouter")
+        if m.engine == "local" { LabeledContent("") { Text(m.localStatus).font(.caption).foregroundStyle(.secondary) } }
+        Picker("雲端模型", selection: $m.transcribeModel) {
           ForEach(transcribeModels, id: \.0) { Text($0.1).tag($0.0) }
         }.onChange(of: m.transcribeModel) { config.set("transcribeModel", m.transcribeModel) }
-        Toggle("AI 整理（去贅字、改口、條列、依 app 調語氣）", isOn: $m.cleanup)
+      }
+      Section(header: SectionHeader("AI")) {
+        Toggle("整理", isOn: $m.cleanup).help("去贅字、改口、條列、依 App 調語氣")
           .onChange(of: m.cleanup) { config.set("cleanup", m.cleanup) }
         Picker("整理模型", selection: $m.cleanupModel) {
           ForEach(cleanupModels, id: \.0) { Text($0.1).tag($0.0) }
@@ -472,114 +496,125 @@ struct SettingsView: View {
         Picker("隨便問模型", selection: $m.askModel) {
           ForEach(askModels, id: \.0) { Text($0.1).tag($0.0) }
         }.onChange(of: m.askModel) { config.set("askModel", m.askModel) }
-        Text("費用由你的 OpenRouter 帳戶支付。一天講 1 小時，轉寫加整理一個月約 3 到 8 美元。")
-          .font(.caption).foregroundStyle(.secondary)
       }
     }
     .formStyle(.columns)
-    .padding(20)
+    .toggleStyle(.switch)
+    .controlSize(.small)
+    .padding(24)
   }
 
+  // 字典與個人化
   var vocab: some View {
-    VStack(alignment: .leading, spacing: 10) {
+    VStack(alignment: .leading, spacing: 12) {
       let p = Learner.personalization()
       let manual = m.items.filter { $0.source == "manual" }.count, auto = m.items.filter { $0.source == "auto" }.count
-      Text("個人化：詞彙 \(m.items.count) 個（手動 \(manual)、自動學到 \(auto)、Typeless \(m.items.count - manual - auto)）。最近 \(p.total) 段裡有 \(p.hits) 段靠詞彙表改對專有名詞。")
-        .font(.callout)
-      Toggle("自動學詞：貼上後 30 秒內你改掉的專有名詞，自動加進「自動新增」", isOn: $m.autoLearn)
-        .onChange(of: m.autoLearn) { config.set("autoLearn", m.autoLearn) }
+      HStack(spacing: 28) {
+        figure("\(m.items.count)", "詞彙")
+        figure("\(auto)", "自動學到")
+        figure("\(p.hits)／\(p.total)", "靠詞彙改對").help("最近幾段裡，整理結果用到詞彙表、而原稿沒有的段數")
+        Spacer()
+        Toggle("自動學詞", isOn: $m.autoLearn).help("貼上後 30 秒內你改掉的專有名詞，自動加進詞彙表")
+          .onChange(of: m.autoLearn) { config.set("autoLearn", m.autoLearn) }
+      }
       HStack {
-        TextField("新增專有名詞，括號裡可寫常被聽成的樣子，例如 GitHub（get hub）", text: $m.newTerm).onSubmit { m.addVocab() }
-        Picker("", selection: $m.newCategory) { ForEach(vocabCategories, id: \.self) { Text($0) } }.frame(width: 120)
-        Button("新增") { m.addVocab() }
+        TextField("新增詞彙", text: $m.newTerm).onSubmit { m.addVocab() }
+          .help("括號裡可寫常被聽成的樣子，例如 GitHub（get hub）")
+        Picker("", selection: $m.newCategory) { ForEach(vocabCategories, id: \.self) { Text($0) } }.labelsHidden().frame(width: 110)
+        Button("新增") { m.addVocab() }.disabled(m.newTerm.trimmingCharacters(in: .whitespaces).isEmpty)
       }
       HStack(spacing: 16) {
-        ForEach(Array(["全部", "手動新增", "自動新增", "Typeless"].enumerated()), id: \.offset) { i, t in
+        ForEach(Array(["全部", "手動 \(manual)", "自動 \(auto)", "Typeless \(m.items.count - manual - auto)"].enumerated()), id: \.offset) { i, t in
           Button(t) { m.vocabFilter = i; m.selection = [] }.buttonStyle(.plain)
             .fontWeight(m.vocabFilter == i ? .semibold : .regular)
             .foregroundStyle(m.vocabFilter == i ? Color.primary : Color.secondary)
         }
         Spacer()
         if !m.categorizing.isEmpty { Text(m.categorizing).font(.caption).foregroundStyle(.secondary) }
-        Button("用 AI 自動分類") { m.autoCategorize() }.buttonStyle(.borderless)
-        if !m.selection.isEmpty { Button("刪除選取的 \(m.selection.count) 個") { m.deleteSelected() } }
+        Button("AI 分類") { m.autoCategorize() }.buttonStyle(.borderless).help("幫還沒分類的詞自動分類")
+        if !m.selection.isEmpty { Button("刪除 \(m.selection.count) 個") { m.deleteSelected() }.buttonStyle(.borderless) }
       }
       List(m.filteredItems, selection: $m.selection) { it in
         HStack {
           Text(it.line)
           Spacer()
           Text(it.category).font(.caption).foregroundStyle(.secondary)
-          Text(it.source == "auto" ? "自動" : it.source == "typeless" ? "Typeless" : "手動").font(.caption).foregroundStyle(.tertiary).frame(width: 56, alignment: .trailing)
           Button("編輯") { m.startEdit(it) }.buttonStyle(.borderless)
         }
         .tag(it.line)
+        .contextMenu { Button("編輯") { m.startEdit(it) }; Button("刪除") { m.selection = [it.line]; m.deleteSelected() } }
       }
-      .frame(minHeight: 260)
-      Text("寫作風格樣本（貼 2 到 3 段你自己寫的文字，整理與隨便問會參考你的用詞與語氣）").font(.callout)
-      TextEditor(text: $m.styleSample).frame(height: 70).border(Color.secondary.opacity(0.3))
+      .frame(minHeight: 230)
+      Text("寫作風格樣本").font(.headline).help("貼 2 到 3 段你自己寫的文字，整理與隨便問會參考你的用詞與語氣")
+      TextEditor(text: $m.styleSample).frame(height: 64).border(Color.secondary.opacity(0.3))
         .onChange(of: m.styleSample) { config.set("styleSample", m.styleSample) }
       HStack {
         Spacer()
-        Button("用文字編輯器開啟詞彙表") { NotificationCenter.default.post(name: .yuOpenVocabFile, object: nil) }
+        Button("用文字編輯器開啟") { NotificationCenter.default.post(name: .yuOpenVocabFile, object: nil) }.buttonStyle(.borderless)
       }
     }
-    .padding()
+    .padding(24)
     .sheet(item: $m.editing) { it in
-      VStack(alignment: .leading, spacing: 12) {
-        Text("編輯詞彙").font(.headline)
+      Form {
         TextField("詞彙", text: $m.editText).disabled(it.source == "typeless")
-        if it.source == "typeless" { Text("Typeless 同步的詞只能改分類；要改字請到 Typeless 字典").font(.caption).foregroundStyle(.secondary) }
+          .help(it.source == "typeless" ? "Typeless 同步的詞只能改分類" : "")
         Picker("分類", selection: $m.editCategory) { ForEach(vocabCategories, id: \.self) { Text($0) } }
-        HStack {
-          Spacer()
-          Button("取消") { m.editing = nil }
-          Button("儲存") { m.saveEdit() }.keyboardShortcut(.defaultAction)
-        }
       }
-      .padding(20).frame(width: 380)
+      .formStyle(.columns)
+      .padding(24)
+      .frame(width: 380)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) { Button("取消") { m.editing = nil } }
+        ToolbarItem(placement: .confirmationAction) { Button("儲存") { m.saveEdit() } }
+      }
     }
   }
 
+  func figure(_ v: String, _ label: String) -> some View {
+    VStack(alignment: .leading, spacing: 1) {
+      Text(v).font(.title2).bold().monospacedDigit()
+      Text(label).font(.caption).foregroundStyle(.secondary)
+    }
+  }
+
+  // 實驗功能
   var labs: some View {
     Form {
-      Section("與 Typeless 同步詞庫") {
-        Toggle("自動把 Typeless 字典同步進來", isOn: $m.typelessSync)
+      Section {
+        Toggle("同步 Typeless 字典", isOn: $m.typelessSync)
+          .help("讀取 Typeless 在本機的字典快取，不需要帳號密碼；Typeless 改版時可能失效")
           .onChange(of: m.typelessSync) { config.set("typelessSync", m.typelessSync); m.changed() }
-        Text("讀取 Typeless 在本機的字典快取，不需要 Typeless 帳號密碼。Typeless 改版時可能失效。快取只在打開 Typeless「字典」頁時更新。")
-          .font(.caption).foregroundStyle(.secondary)
-        HStack {
-          Button("立即雙向同步") { m.runTypelessSync() }.disabled(!m.typelessSync)
-          Text("目前同步區 \(VocabStore.syncedCount()) 個詞").font(.caption).foregroundStyle(.secondary)
+        LabeledContent("同步區") {
+          HStack {
+            Text("\(VocabStore.syncedCount()) 個詞").foregroundStyle(.secondary)
+            Button("立即雙向同步") { m.runTypelessSync() }.disabled(!m.typelessSync)
+          }
         }
-        if !m.syncReport.isEmpty { Text(m.syncReport).font(.caption) }
-      }
+        if !m.syncReport.isEmpty { LabeledContent("") { Text(m.syncReport).font(.caption).foregroundStyle(.secondary) } }
+      } header: { SectionHeader("Typeless") }
     }
     .formStyle(.columns)
-    .padding(20)
+    .toggleStyle(.switch)
+    .controlSize(.small)
+    .padding(24)
   }
 
+  // 關於
   var about: some View {
-    VStack(alignment: .leading, spacing: 10) {
-      HStack(spacing: 12) {
-        Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56)
-        VStack(alignment: .leading) {
-          Text("HAUS Type").font(.title2).bold()
-          Text("版本 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "開發版")")
-            .foregroundStyle(.secondary)
-        }
-      }
-      Text("隱私").font(.headline)
-      Text("錄音與游標附近的文字會送到 OpenRouter，再轉給你選的模型供應商（OpenAI、Anthropic 等）處理。歷史紀錄、詞彙表與設定只存在這台 Mac 的 ~/.haustype 資料夾。密碼欄位不會讀取。")
-        .font(.callout).fixedSize(horizontal: false, vertical: true)
-      Text("授權").font(.headline)
-      Text("MIT 授權。整理規則改寫自 jarvis-voice（MIT）。").font(.callout)
-      HStack {
+    VStack(spacing: 14) {
+      Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 96, height: 96)
+      Text("HAUS Type").font(.largeTitle).bold()
+      Text("版本 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "開發版")")
+        .foregroundStyle(.secondary)
+      HStack(spacing: 18) {
         Button("開啟資料夾") { NSWorkspace.shared.open(homeDir) }
+        Link("隱私說明", destination: URL(string: "https://github.com/hausco/haus-type#隱私")!)
         Link("專案網站", destination: URL(string: "https://github.com/hausco/haus-type")!)
       }
-      Spacer()
+      Text("MIT 授權・整理規則改寫自 jarvis-voice").font(.caption).foregroundStyle(.tertiary)
     }
-    .padding(20)
+    .frame(maxWidth: .infinity)
+    .padding(.top, 48)
   }
 }
 
@@ -597,7 +632,9 @@ enum Windows {
     if let w = slot { w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
     let w = NSWindow(contentViewController: NSHostingController(rootView: view))
     w.title = title
-    w.styleMask = [.titled, .closable, .miniaturizable]
+    // macOS 27：內容延伸到標題列下，側邊欄與工具列合成一體
+    w.styleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
+    w.toolbarStyle = .unified
     w.isReleasedWhenClosed = false
     w.center()
     w.makeKeyAndOrderFront(nil)

@@ -72,42 +72,42 @@ struct OnboardingView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 18) {
       HStack(spacing: 14) {
-        Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56)
+        Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64)
         VStack(alignment: .leading, spacing: 4) {
-          Text("歡迎使用 HAUS Type").font(.title2).bold()
-          Text("按一下快捷鍵講話，再按一下，整理好的文字就會打進游標所在的地方。").foregroundStyle(.secondary)
+          Text("歡迎使用 HAUS Type").font(.largeTitle).bold()
+          Text("講出來，不要打字").foregroundStyle(.secondary)
         }
       }
       Divider()
-      step(1, "麥克風", done: m.micOK, detail: "聽你講話用。") {
+      step(1, "麥克風", done: m.micOK, detail: "聽你講話") {
         Button(m.mic == .denied ? "到系統設定打開" : "允許麥克風") { m.requestMic() }
       }
-      step(2, "輔助使用", done: m.trusted, detail: "偵測快捷鍵、把文字貼進輸入框用。在清單裡打開 HAUS Type。") {
+      step(2, "輔助使用", done: m.trusted, detail: "偵測快捷鍵、貼上文字") {
         Button("開啟設定") { m.openAccessibility() }
       }
-      step(3, "Fn 鍵", done: nil, detail: "要用 Fn（🌐）鍵，請把「按下 🌐 鍵時」改成「不做任何事」。用滑鼠中鍵或自訂組合鍵可以略過。") {
+      step(3, "Fn 鍵", done: nil, detail: "「按下 🌐 鍵時」改成「不做任何事」") {
         Button("開啟鍵盤設定") { m.openKeyboard() }
       }
       VStack(alignment: .leading, spacing: 8) {
         stepTitle(4, "OpenRouter 金鑰", done: m.hasKey)
-        Text("轉寫與整理透過 OpenRouter 呼叫 AI 模型，費用由你的帳戶支付。").font(.callout).foregroundStyle(.secondary)
+        Text("費用由你的 OpenRouter 帳戶支付").font(.callout).foregroundStyle(.secondary)
         if !m.hasKey {
           HStack {
-            SecureField("貼上 sk-or- 開頭的金鑰", text: $m.keyInput)
+            SecureField("sk-or-…", text: $m.keyInput)
             Button(m.testing ? "測試中…" : "測試並儲存") { m.saveKey() }.disabled(m.testing)
           }
           HStack {
-            Link("到 openrouter.ai 申請金鑰", destination: URL(string: "https://openrouter.ai/settings/keys")!)
+            Link("申請金鑰", destination: URL(string: "https://openrouter.ai/settings/keys")!)
             if !m.keyStatus.isEmpty { Text(m.keyStatus).font(.caption).foregroundStyle(.secondary) }
           }
         }
       }
       Spacer()
       HStack {
-        Text(m.allOK ? "都設定好了。按一下 Fn 講一句話試試看。" : "完成上面的步驟後就能開始用。")
+        Text(m.allOK ? "按一下 Fn 試試看" : "")
           .foregroundStyle(.secondary)
         Spacer()
-        Button("完成") { onFinish() }.keyboardShortcut(.defaultAction).disabled(!m.allOK)
+        Button("完成") { onFinish() }.keyboardShortcut(.defaultAction).disabled(!m.allOK).controlSize(.large)
       }
     }
     .padding(24)

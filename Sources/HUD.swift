@@ -47,6 +47,8 @@ final class HUDView: NSView {
   private var phase = 0.0
 
   override var isFlipped: Bool { true }
+  // macOS 26 以上由外層的 Liquid Glass 畫底，這裡只畫內容
+  var drawsBackground = true
   // 不用先點一下讓視窗取得焦點，第一下就能按
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -64,8 +66,10 @@ final class HUDView: NSView {
   override func draw(_ dirty: NSRect) {
     // 單一膠囊底，裡面的元素都不加圓角底（遵守「圓角框不包圓角框」）
     let b = bounds
-    NSColor(white: 0.06, alpha: 0.94).setFill()
-    NSBezierPath(roundedRect: b, xRadius: b.height / 2, yRadius: b.height / 2).fill()
+    if drawsBackground {
+      NSColor(white: 0.06, alpha: 0.94).setFill()
+      NSBezierPath(roundedRect: b, xRadius: b.height / 2, yRadius: b.height / 2).fill()
+    }
     switch mode {
     case .recording:
       drawSymbol("xmark", at: NSPoint(x: 20, y: b.midY), size: 12)
@@ -168,7 +172,21 @@ final class HUD {
     panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
     panel.hidesOnDeactivate = false
     panel.isMovable = false
-    panel.contentView = view
+    if #available(macOS 26.0, *) {
+      // 深色 Liquid Glass 膠囊：玻璃材質加深色調，看起來仍是黑色膠囊
+      let glass = NSGlassEffectView(frame: panel.contentLayoutRect)
+      glass.cornerRadius = 17
+      glass.tintColor = NSColor(white: 0, alpha: 0.55)
+      glass.autoresizingMask = [.width, .height]
+      view.drawsBackground = false
+      view.frame = glass.bounds
+      view.autoresizingMask = [.width, .height]
+      glass.contentView = view
+      panel.contentView = glass
+      panel.appearance = NSAppearance(named: .darkAqua)
+    } else {
+      panel.contentView = view
+    }
   }
 
   var onCancel: (() -> Void)? { get { view.onCancel } set { view.onCancel = newValue } }
