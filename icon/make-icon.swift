@@ -1,4 +1,4 @@
-// 產生 HAUS Type 的 app icon（1024×1024 PNG）。用法：swift icon/make-icon.swift 輸出.png [blue|ink|white]，正式版用 blue
+// 產生 HAUS Type 的 app icon（1024×1024 PNG）。用法：swift icon/make-icon.swift 輸出.png [blue|ink|white] [條數]，正式版用 blue 5
 // 設計：HAUS 標誌的桶形外框（上下弧線往中間收、兩側直線）用一排平頭直線排出來，同時也是聲波。
 // 弧線沿用 HAUS 品牌規範：每條弧線的下垂量固定為寬度的 0.0706（取自 HAUS_Element_Lens-Solid 的貝茲曲線）。
 // 最外側兩條直線用 HAUS Teal（呼應標誌左右兩條青色直線），其餘用白或藍；直線一律平頭，不用圓角。
@@ -9,6 +9,8 @@ let size: CGFloat = 1024
 let args = CommandLine.arguments
 let out = args.count > 1 ? args[1] : "icon.png"
 let variant = args.count > 2 ? args[2] : "blue"
+// 直線條數：少一點，小尺寸（16～32 px）才看得出來
+let count = args.count > 3 ? Int(args[3])! : 5
 
 let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size), pixelsHigh: Int(size), bitsPerSample: 8,
                            samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
@@ -55,12 +57,12 @@ func sagAt(_ x: Double) -> Double {  // 回傳該 x 的下垂量（0～12.23）�
   return by((lo + hi) / 2)
 }
 
-// 3. 直線：9 條，頭尾貼齊桶形左右邊；高度＝桶形在該位置的高度
-let count = 9
-let drawW: CGFloat = 600          // 桶形寬度（畫面上）
+// 3. 直線（預設 5 條），頭尾貼齊桶形左右邊；高度＝桶形在該位置的高度
+let drawW: CGFloat = 580          // 桶形寬度（畫面上）
 let edgeH: CGFloat = 520          // 兩側最高的直線長度
 let scale = Double(drawW) / lensW // 弧線下垂量依寬度等比例縮放，維持 0.0706 的比例
-let barW: CGFloat = 32
+// 條數越少越粗：直線與間距約 1:1.3
+let barW: CGFloat = (drawW / (CGFloat(count) * 2.3 - 1.3)).rounded()
 let left = body.midX - drawW / 2
 for i in 0..<count {
   // 直線中心等距排列：頭尾直線的外緣剛好貼齊桶形左右邊
