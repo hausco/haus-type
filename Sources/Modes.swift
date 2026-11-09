@@ -60,7 +60,7 @@ let askSystemPrompt = """
 // 隨便問：送給較聰明的模型，可回 insert／replace_selection／answer
 func ask(_ transcript: String, _ ctx: Context, key: String) async throws -> CleanResult? {
   let (_, user) = buildPrompt(transcript, ctx)
-  let system = "\(askSystemPrompt)\n\n<vocabulary>\n\(vocabulary().map(baseTerm).joined(separator: "\n"))\n</vocabulary>"
+  let system = "\(askSystemPrompt)\(outputPreferences())\n\n<vocabulary>\n\(vocabulary().map(baseTerm).joined(separator: "\n"))\n</vocabulary>"
   var body: [String: Any] = [
     "model": config.string("askModel"),
     "max_tokens": 4000,

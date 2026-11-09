@@ -69,8 +69,17 @@ final class SettingsModel: ObservableObject {
   @Published var keyStatus = ""
   @Published var keyTesting = false
   @Published var hasKey: Bool
-  @Published var terms: [String]
+  @Published var items: [VocabItem] = VocabStore.items()
   @Published var newTerm = ""
+  @Published var newCategory = "一般"
+  @Published var vocabFilter = 0          // 0 全部、1 手動、2 自動新增、3 Typeless
+  @Published var selection = Set<String>()
+  @Published var editing: VocabItem?
+  @Published var editText = ""
+  @Published var editCategory = "一般"
+  @Published var autoLearn = config.bool("autoLearn")
+  @Published var styleSample = config.string("styleSample")
+  @Published var categorizing = ""
   @Published var syncReport = ""
   private var monitor: Any?
 
@@ -93,7 +102,6 @@ final class SettingsModel: ObservableObject {
     typelessSync = config.bool("typelessSync")
     login = SMAppService.mainApp.status == .enabled
     hasKey = apiKey() != nil
-    terms = VocabStore.userTerms()
     var f: [Mode: Bool] = [:], ms: [Mode: Bool] = [:], cs: [Mode: String] = [:]
     for m in [Mode.dictate, .translate, .ask] {
       let hk = config.strings(SettingsModel.key(m)).map { $0.lowercased() }
@@ -199,18 +207,46 @@ final class SettingsModel: ObservableObject {
     changed()
   }
 
-  func addTerm() {
-    let t = newTerm.trimmingCharacters(in: .whitespaces)
-    guard !t.isEmpty, !terms.contains(t) else { return }
-    terms.append(t)
-    newTerm = ""
-    VocabStore.save(terms)
+  func reloadVocab() { items = VocabStore.items(); selection = [] }
+
+  var filteredItems: [VocabItem] {
+    switch vocabFilter {
+    case 1: return items.filter { $0.source == "manual" }
+    case 2: return items.filter { $0.source == "auto" }
+    case 3: return items.filter { $0.source == "typeless" }
+    default: return items
+    }
   }
 
-  func removeTerms(_ idx: IndexSet) {
-    terms.remove(atOffsets: idx)
-    VocabStore.save(terms)
+  func addVocab() {
+    VocabStore.add(newTerm, category: newCategory, auto: false)
+    newTerm = ""
+    reloadVocab()
   }
+
+  func deleteSelected() {
+    VocabStore.delete(selection)
+    reloadVocab()
+  }
+
+  func autoCategorize() {
+    categorizing = "分類中…"
+    Task {
+      let n = await autoCategorizeVocab()
+      await MainActor.run { self.categorizing = n > 0 ? "已分類 \(n) 個" : "沒有需要分類的詞"; self.reloadVocab() }
+    }
+  }
+
+  func startEdit(_ it: VocabItem) { editing = it; editText = it.line; editCategory = it.category }
+
+  func saveEdit() {
+    guard let it = editing else { return }
+    VocabStore.edit(it.line, to: editText, category: editCategory)
+    editing = nil
+    reloadVocab()
+  }
+
+  func addTerm() { addVocab() }
 
   func runTypelessSync() {
     let r = syncWithTypeless(writeCSV: true)
@@ -246,7 +282,7 @@ struct SettingsView: View {
   @State var addApp = ""
   @State var tab: Int
   init(tab: Int = 0) { _tab = State(initialValue: tab) }
-  private let tabs = ["一般", "快捷鍵", "金鑰與模型", "專有名詞", "實驗功能", "關於"]
+  private let tabs = ["一般", "快捷鍵", "金鑰與模型", "字典", "實驗功能", "關於"]
 
   var body: some View {
     VStack(spacing: 0) {
@@ -413,23 +449,63 @@ struct SettingsView: View {
   }
 
   var vocab: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      Text("轉寫常聽錯的人名、品牌、術語加在這裡，整理時會改成正確寫法。括號裡可以寫常被聽成的樣子，例如「GitHub（get hub）」。")
-        .font(.caption).foregroundStyle(.secondary)
+    VStack(alignment: .leading, spacing: 10) {
+      let p = Learner.personalization()
+      let manual = m.items.filter { $0.source == "manual" }.count, auto = m.items.filter { $0.source == "auto" }.count
+      Text("個人化：詞彙 \(m.items.count) 個（手動 \(manual)、自動學到 \(auto)、Typeless \(m.items.count - manual - auto)）。最近 \(p.total) 段裡有 \(p.hits) 段靠詞彙表改對專有名詞。")
+        .font(.callout)
+      Toggle("自動學詞：貼上後 30 秒內你改掉的專有名詞，自動加進「自動新增」", isOn: $m.autoLearn)
+        .onChange(of: m.autoLearn) { config.set("autoLearn", m.autoLearn) }
       HStack {
-        TextField("新增專有名詞", text: $m.newTerm).onSubmit { m.addTerm() }
-        Button("新增") { m.addTerm() }
+        TextField("新增專有名詞，括號裡可寫常被聽成的樣子，例如 GitHub（get hub）", text: $m.newTerm).onSubmit { m.addVocab() }
+        Picker("", selection: $m.newCategory) { ForEach(vocabCategories, id: \.self) { Text($0) } }.frame(width: 120)
+        Button("新增") { m.addVocab() }
       }
-      List {
-        ForEach(m.terms, id: \.self) { Text($0) }.onDelete { m.removeTerms($0) }
-      }
-      HStack {
-        Text("共 \(m.terms.count) 個（選取後按 Delete 刪除）").font(.caption).foregroundStyle(.secondary)
+      HStack(spacing: 16) {
+        ForEach(Array(["全部", "手動新增", "自動新增", "Typeless"].enumerated()), id: \.offset) { i, t in
+          Button(t) { m.vocabFilter = i; m.selection = [] }.buttonStyle(.plain)
+            .fontWeight(m.vocabFilter == i ? .semibold : .regular)
+            .foregroundStyle(m.vocabFilter == i ? Color.primary : Color.secondary)
+        }
         Spacer()
-        Button("用文字編輯器開啟") { NotificationCenter.default.post(name: .yuOpenVocabFile, object: nil) }
+        if !m.categorizing.isEmpty { Text(m.categorizing).font(.caption).foregroundStyle(.secondary) }
+        Button("用 AI 自動分類") { m.autoCategorize() }.buttonStyle(.borderless)
+        if !m.selection.isEmpty { Button("刪除選取的 \(m.selection.count) 個") { m.deleteSelected() } }
+      }
+      List(m.filteredItems, selection: $m.selection) { it in
+        HStack {
+          Text(it.line)
+          Spacer()
+          Text(it.category).font(.caption).foregroundStyle(.secondary)
+          Text(it.source == "auto" ? "自動" : it.source == "typeless" ? "Typeless" : "手動").font(.caption).foregroundStyle(.tertiary).frame(width: 56, alignment: .trailing)
+          Button("編輯") { m.startEdit(it) }.buttonStyle(.borderless)
+        }
+        .tag(it.line)
+      }
+      .frame(minHeight: 260)
+      Text("寫作風格樣本（貼 2 到 3 段你自己寫的文字，整理與隨便問會參考你的用詞與語氣）").font(.callout)
+      TextEditor(text: $m.styleSample).frame(height: 70).border(Color.secondary.opacity(0.3))
+        .onChange(of: m.styleSample) { config.set("styleSample", m.styleSample) }
+      HStack {
+        Spacer()
+        Button("用文字編輯器開啟詞彙表") { NotificationCenter.default.post(name: .yuOpenVocabFile, object: nil) }
       }
     }
     .padding()
+    .sheet(item: $m.editing) { it in
+      VStack(alignment: .leading, spacing: 12) {
+        Text("編輯詞彙").font(.headline)
+        TextField("詞彙", text: $m.editText).disabled(it.source == "typeless")
+        if it.source == "typeless" { Text("Typeless 同步的詞只能改分類；要改字請到 Typeless 字典").font(.caption).foregroundStyle(.secondary) }
+        Picker("分類", selection: $m.editCategory) { ForEach(vocabCategories, id: \.self) { Text($0) } }
+        HStack {
+          Spacer()
+          Button("取消") { m.editing = nil }
+          Button("儲存") { m.saveEdit() }.keyboardShortcut(.defaultAction)
+        }
+      }
+      .padding(20).frame(width: 380)
+    }
   }
 
   var labs: some View {

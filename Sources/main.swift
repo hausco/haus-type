@@ -69,6 +69,10 @@ let defaultConfig: [String: Any] = [
   // 歷史保存天數（-1 永久、0 不保存）、錄音保存天數（給重試與另存用）
   "historyDays": 30,
   "audioDays": 7,
+  // 自動學詞：貼上後使用者改掉的專有名詞自動加進詞彙表
+  "autoLearn": true,
+  // 寫作風格樣本：隨便問與整理時參考用詞與語氣
+  "styleSample": "",
   // Typeless 詞庫同步：實驗功能，預設關閉
   "typelessSync": false,
   // 首次啟動引導是否已完成
@@ -531,6 +535,8 @@ func outputPreferences() -> String {
   if !config.bool("smartFormatting") { lines.append("不要排成條列，也不要自己換行；照講的順序輸出成一段（使用者說「換行」時才換行）。") }
   if !config.bool("autoPunctuation") { lines.append("不要補標點符號，只在原本停頓的地方用一個空白隔開。") }
   lines.append(config.string("englishVariant") == "uk" ? "英文一律用英式拼寫（colour、organise）。" : "英文一律用美式拼寫（color、organize）。")
+  let sample = config.string("styleSample").trimmingCharacters(in: .whitespacesAndNewlines)
+  if !sample.isEmpty { lines.append("使用者平常的寫法如下，用詞與語氣盡量貼近，但不要改動原稿的內容：\n<style_sample>\(sample.prefix(1500))</style_sample>") }
   return "\n\n使用者的輸出偏好（優先於上面的規則）：\n" + lines.map { "- " + $0 }.joined(separator: "\n")
 }
 
@@ -1184,6 +1190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
       // 使用者已經切到別的 app 時，照樣貼到現在的最前面；錄音當下的 app 只拿來判斷語氣
       paste(o.text)
+      Learner.watch(pid: ctx.pid, pasted: o.text)
       self.hud.hide()
       self.setStatus("已貼上（等待 \(waitMs) ms\(hit ? "，預先轉寫" : "")，\(o.note)）", icon: "checkmark")
       DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
@@ -1350,6 +1357,25 @@ if let i = args.firstIndex(of: "--render-settings"), i + 2 < args.count {
     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 2]))
   }
   exit(0)
+}
+// 開發用：測自動學詞。--test-learn 改之前 改之後 貼上的字
+if let i = args.firstIndex(of: "--test-learn"), i + 3 < args.count {
+  ensureHome()
+  if let (o, n) = Learner.changedWord(before: args[i + 1], after: args[i + 2], pasted: args[i + 3]) {
+    print("偵測到：「\(o)」→「\(n)」")
+    if args.contains("--judge") {
+      let sem = DispatchSemaphore(value: 0)
+      Task.detached { await Learner.judge(old: o, new: n, sentence: args[i + 3]); sem.signal() }
+      sem.wait()
+    }
+  } else { print("沒有可學的修改") }
+  exit(0)
+}
+if args.contains("--categorize") {
+  ensureHome()
+  let sem = DispatchSemaphore(value: 0)
+  Task.detached { print("已分類 \(await autoCategorizeVocab()) 個"); sem.signal() }
+  sem.wait(); exit(0)
 }
 if args.contains("--sync-typeless") {
   ensureHome()
