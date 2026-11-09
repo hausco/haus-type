@@ -47,6 +47,14 @@ final class SettingsModel: ObservableObject {
   @Published var mouseOn: [Mode: Bool] = [:]
   @Published var combos: [Mode: String] = [:]
   @Published var recordingFor: Mode?
+  @Published var micUID: String
+  @Published var mics: [AudioDevice] = inputDevices()
+  @Published var mute: Bool
+  @Published var showInDock: Bool
+  @Published var smartFormatting: Bool
+  @Published var autoPunctuation: Bool
+  @Published var englishVariant: String
+  @Published var noContextApps: [String]
   @Published var translateTargets: [String]
   @Published var translateTarget: String
   @Published var askModel: String
@@ -67,6 +75,13 @@ final class SettingsModel: ObservableObject {
   private var monitor: Any?
 
   init() {
+    micUID = config.string("micUID")
+    mute = config.bool("muteWhileDictating")
+    showInDock = config.bool("showInDock")
+    smartFormatting = config.bool("smartFormatting")
+    autoPunctuation = config.bool("autoPunctuation")
+    englishVariant = config.string("englishVariant")
+    noContextApps = config.strings("noContextApps")
     translateTargets = config.strings("translateTargets")
     translateTarget = currentTranslateTarget()
     askModel = config.string("askModel")
@@ -107,6 +122,18 @@ final class SettingsModel: ObservableObject {
     if mouseOn[m] == true { hk.append("mouse2") }
     if let c = combos[m], !c.isEmpty { hk.append(c) }
     config.set(SettingsModel.key(m), hk)
+  }
+
+  // 隱私清單：加入或移除 app（bundle id）
+  func addNoContext(_ bundle: String) {
+    guard !bundle.isEmpty, !noContextApps.contains(bundle) else { return }
+    noContextApps.append(bundle)
+    config.set("noContextApps", noContextApps)
+  }
+
+  func removeNoContext(_ bundle: String) {
+    noContextApps.removeAll { $0 == bundle }
+    config.set("noContextApps", noContextApps)
   }
 
   func toggleTarget(_ lang: String, _ on: Bool) {
@@ -195,9 +222,30 @@ final class SettingsModel: ObservableObject {
   }
 }
 
+// bundle id 轉成 app 顯示名稱（找不到就顯示 bundle id）
+let knownAppNames = ["com.1password.1password": "1Password", "com.agilebits.onepassword7": "1Password 7",
+                     "com.bitwarden.desktop": "Bitwarden", "com.apple.keychainaccess": "鑰匙圈存取", "com.apple.Passwords": "密碼"]
+
+func appName(_ bundle: String) -> String {
+  if let n = knownAppNames[bundle] { return n }
+  guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return bundle }
+  return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
+}
+
+// 目前開著的一般 app（加入隱私清單用）
+func runningAppChoices() -> [(String, String)] {
+  NSWorkspace.shared.runningApplications
+    .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != nil && $0.bundleIdentifier != Bundle.main.bundleIdentifier }
+    .map { ($0.bundleIdentifier!, $0.localizedName ?? $0.bundleIdentifier!) }
+    .sorted { $0.1 < $1.1 }
+}
+
 struct SettingsView: View {
   @StateObject var m = SettingsModel()
-  @State var tab = 0
+  @StateObject var tester = MicTester()
+  @State var addApp = ""
+  @State var tab: Int
+  init(tab: Int = 0) { _tab = State(initialValue: tab) }
   private let tabs = ["一般", "快捷鍵", "金鑰與模型", "專有名詞", "實驗功能", "關於"]
 
   var body: some View {
@@ -218,7 +266,7 @@ struct SettingsView: View {
       }
       .padding(.top, 12)
       Divider()
-      Group {
+      ScrollView {
         switch tab {
         case 0: general
         case 1: shortcuts
@@ -230,13 +278,53 @@ struct SettingsView: View {
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
-    .frame(width: 580, height: 480)
-    .onDisappear { m.stopRecording() }
+    .frame(width: 600, height: 520)
+    .onDisappear { m.stopRecording(); tester.stop() }
   }
 
   var general: some View {
     Form {
+      Section("音訊") {
+        Picker("麥克風", selection: $m.micUID) {
+          Text("系統預設").tag("")
+          ForEach(m.mics) { Text($0.name).tag($0.uid) }
+        }.onChange(of: m.micUID) { config.set("micUID", m.micUID); if tester.running { tester.start() } }
+        HStack {
+          Button(tester.running ? "停止測試" : "測試麥克風") { tester.running ? tester.stop() : tester.start() }
+          // 音量條：平頭長條，不用圓角
+          GeometryReader { g in
+            ZStack(alignment: .leading) {
+              Rectangle().fill(Color.secondary.opacity(0.2))
+              Rectangle().fill(Color.accentColor).frame(width: g.size.width * CGFloat(min(1, sqrt(tester.level) * 1.2)))
+            }
+          }.frame(height: 6)
+        }
+        Toggle("錄音時把其他聲音靜音", isOn: $m.mute).onChange(of: m.mute) { config.set("muteWhileDictating", m.mute) }
+      }
+      Section("輸出") {
+        Toggle("智慧排版（講「第一、第二」排成條列、自動分段）", isOn: $m.smartFormatting)
+          .onChange(of: m.smartFormatting) { config.set("smartFormatting", m.smartFormatting) }
+        Toggle("自動補標點", isOn: $m.autoPunctuation).onChange(of: m.autoPunctuation) { config.set("autoPunctuation", m.autoPunctuation) }
+        Picker("英文拼寫", selection: $m.englishVariant) {
+          Text("美式（color）").tag("us")
+          Text("英式（colour）").tag("uk")
+        }.onChange(of: m.englishVariant) { config.set("englishVariant", m.englishVariant) }
+      }
+      Section("隱私：這些 app 在最前面時，不讀取游標附近的文字與視窗標題") {
+        ForEach(m.noContextApps, id: \.self) { b in
+          HStack {
+            Text(appName(b))
+            Spacer()
+            Button("移除") { m.removeNoContext(b) }
+          }
+        }
+        Picker("加入目前開著的 app", selection: $addApp) {
+          Text("選擇…").tag("")
+          ForEach(runningAppChoices(), id: \.0) { Text($0.1).tag($0.0) }
+        }.onChange(of: addApp) { m.addNoContext(addApp); addApp = "" }
+      }
       Section("一般") {
+        Toggle("顯示在 Dock", isOn: $m.showInDock).onChange(of: m.showInDock) { config.set("showInDock", m.showInDock); m.changed() }
         Toggle("提示音", isOn: $m.sounds).onChange(of: m.sounds) { config.set("sounds", m.sounds) }
         Toggle("預先轉寫（講完停頓時先送出，按結束後更快貼上）", isOn: $m.speculative)
           .onChange(of: m.speculative) { config.set("speculative", m.speculative) }

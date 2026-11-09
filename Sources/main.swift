@@ -7,6 +7,7 @@ import AVFoundation
 import ApplicationServices
 import Cocoa
 import ServiceManagement
+import SwiftUI
 
 // MARK: - 路徑與設定
 
@@ -53,6 +54,18 @@ let defaultConfig: [String: Any] = [
   "speculativePauseSec": 0.6,
   "transcribeTimeoutSec": 20.0,
   "sounds": true,
+  // 音訊：指定麥克風（空字串＝系統預設）、錄音時把喇叭靜音
+  "micUID": "",
+  "muteWhileDictating": true,
+  // 一般：顯示在 Dock
+  "showInDock": false,
+  // 輸出：智慧排版（條列、換行）、自動標點、英文拼寫（us／uk）
+  "smartFormatting": true,
+  "autoPunctuation": true,
+  "englishVariant": "us",
+  // 隱私：這些 app 在最前面時，只送 app 名稱，不讀游標前後、選取的字與視窗標題
+  "noContextApps": ["com.1password.1password", "com.agilebits.onepassword7", "com.bitwarden.desktop",
+                    "com.apple.keychainaccess", "com.apple.Passwords"],
   // Typeless 詞庫同步：實驗功能，預設關閉
   "typelessSync": false,
   // 首次啟動引導是否已完成
@@ -307,6 +320,8 @@ func readContext() -> Context {
   ctx.app = front.localizedName ?? ""
   ctx.bundle = front.bundleIdentifier ?? ""
   ctx.pid = front.processIdentifier
+  // 隱私清單裡的 app：只留 app 名稱
+  if config.strings("noContextApps").contains(ctx.bundle) { return ctx }
   let appEl = AXUIElementCreateApplication(front.processIdentifier)
   AXUIElementSetMessagingTimeout(appEl, 0.3)
   var win: CFTypeRef?
@@ -351,6 +366,7 @@ final class Recorder {
   func start() throws {
     lock.lock(); pcm = Data(); peak = 0; lock.unlock()
     let engine = AVAudioEngine()
+    applyInputDevice(engine, selectedInputDevice())
     let input = engine.inputNode
     let inFormat = input.outputFormat(forBus: 0)
     guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else { throw NSError(domain: "HAUS Type", code: 1, userInfo: [NSLocalizedDescriptionKey: "麥克風開不起來（沒有輸入裝置或沒有權限）"]) }
@@ -506,8 +522,17 @@ struct CleanResult {
 
 func tag(_ name: String, _ value: String) -> String { value.isEmpty ? "" : "<\(name)>\(value)</\(name)>\n" }
 
+// 設定裡的輸出選項，附在整理規則後面
+func outputPreferences() -> String {
+  var lines: [String] = []
+  if !config.bool("smartFormatting") { lines.append("不要排成條列，也不要自己換行；照講的順序輸出成一段（使用者說「換行」時才換行）。") }
+  if !config.bool("autoPunctuation") { lines.append("不要補標點符號，只在原本停頓的地方用一個空白隔開。") }
+  lines.append(config.string("englishVariant") == "uk" ? "英文一律用英式拼寫（colour、organise）。" : "英文一律用美式拼寫（color、organize）。")
+  return "\n\n使用者的輸出偏好（優先於上面的規則）：\n" + lines.map { "- " + $0 }.joined(separator: "\n")
+}
+
 func buildPrompt(_ transcript: String, _ ctx: Context) -> (String, String) {
-  let system = "\(cleanupRules())\n\n<vocabulary>\n\(vocabulary().joined(separator: "\n"))\n</vocabulary>"
+  let system = "\(cleanupRules())\(outputPreferences())\n\n<vocabulary>\n\(vocabulary().joined(separator: "\n"))\n</vocabulary>"
   let appName = ctx.app.isEmpty ? "" : "\(ctx.app)（\(ctx.bundle)，只是使用者正在打字的地方，不是原稿講的東西）"
   let user = [
     tag("app", appName), tag("window", ctx.window), "<field>\(ctx.role)</field>\n",
@@ -852,12 +877,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     setIcon("mic")
     buildMenu()
+    OutputMute.recoverIfNeeded()
+    applyDockPolicy()
     let trusted = AXIsProcessTrusted()
     // 設定視窗改了東西：重新套用快捷鍵、重建選單
     NotificationCenter.default.addObserver(forName: .yuConfigChanged, object: nil, queue: .main) { [weak self] _ in
       guard let self else { return }
       self.configureHotkeys()
       self.buildMenu()
+      self.applyDockPolicy()
       if apiKey() != nil, self.statusLine.title.contains("金鑰") { self.setStatus("待命", icon: "mic") }
       self.autoPull()
     }
@@ -986,6 +1014,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     s.stop(); s.play()
   }
 
+  // 顯示在 Dock：regular 會出現在 Dock 與 Cmd+Tab，accessory 只在選單列
+  func applyDockPolicy() {
+    NSApp.setActivationPolicy(config.bool("showInDock") ? .regular : .accessory)
+  }
+
   // 三種模式的快捷鍵一起套用
   func configureHotkeys() {
     hotkey.configure(dictate: config.strings("hotkeys"), translate: config.strings("translateHotkeys"), ask: config.strings("askHotkeys"))
@@ -1017,6 +1050,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     spec?.task.cancel(); spec = nil
     log("開始錄音（\(m.label)）")
     setStatus("錄音中（\(m.label)）", icon: "mic.fill")
+    // 開始提示音播完再靜音喇叭
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { if self.recording { OutputMute.begin() } }
     hud.recording(label: m == .dictate ? "" : m == .translate ? "翻譯 → \(currentTranslateTarget())" : "提問")
     sound(Tone.start)
     if let key = apiKey() { Task.detached { await warmUp(key: key) } }
@@ -1029,6 +1064,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     log("取消錄音")
     recording = false
     let (audio, seconds) = recorder.stop()
+    OutputMute.end()
     spec?.task.cancel(); spec = nil
     cancelled = (audio, seconds, ctx, mode)
     setStatus("待命", icon: "mic")
@@ -1072,6 +1108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     recording = false
     let held = Date().timeIntervalSince(downAt) * 1000
     let (audio, seconds) = recorder.stop()
+    OutputMute.end()
     log("停止錄音：按住 \(Int(held)) ms，收到聲音 \(String(format: "%.2f", seconds)) 秒，最大音量 \(String(format: "%.3f", recorder.peak))")
     let pending = spec
     spec = nil
@@ -1266,6 +1303,23 @@ func runTest(_ args: [String]) -> Int32 {
 // MARK: - 進入點
 
 let args = CommandLine.arguments
+// 開發用：把設定視窗某一頁畫成圖檔檢查版面，YuVoice --render-settings 分頁編號 輸出.png
+if let i = args.firstIndex(of: "--render-settings"), i + 2 < args.count {
+  ensureHome()
+  _ = NSApplication.shared
+  let view = SettingsView(tab: Int(args[i + 1]) ?? 0)
+  let host = NSHostingView(rootView: view)
+  host.frame = NSRect(x: 0, y: 0, width: 600, height: 520)
+  let win = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+  win.contentView = host
+  host.layoutSubtreeIfNeeded()
+  RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+  if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+    host.cacheDisplay(in: host.bounds, to: rep)
+    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 2]))
+  }
+  exit(0)
+}
 if args.contains("--sync-typeless") {
   ensureHome()
   let r = syncWithTypeless(writeCSV: true)
