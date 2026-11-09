@@ -107,12 +107,22 @@ struct AnswerView: View {
       }
       .font(.callout)
     }
-    .padding(18)
+    .padding(20)
     .frame(width: 520)
     .frame(minHeight: 140, maxHeight: 440)
-    .background(
-      RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.regularMaterial)
-    )
+    .modifier(AnswerBackground())
+    .environment(\.colorScheme, .dark)
+  }
+}
+
+// 答案視窗底：macOS 26 以上用深色 Liquid Glass，舊系統用毛玻璃
+struct AnswerBackground: ViewModifier {
+  func body(content: Content) -> some View {
+    if #available(macOS 26.0, *) {
+      content.glassEffect(.regular.tint(Color.black.opacity(0.45)), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    } else {
+      content.background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(.regularMaterial))
+    }
   }
 }
 

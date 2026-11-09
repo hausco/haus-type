@@ -77,15 +77,21 @@ final class HistoryModel: ObservableObject {
   }
 }
 
+enum HistoryPage: Int, CaseIterable, Identifiable {
+  case overview, all, dictate, translate, ask
+  var id: Int { rawValue }
+  var title: String { ["總覽", "全部", "口述", "翻譯", "提問"][rawValue] }
+  var symbol: String { ["chart.bar.xaxis", "tray.full", "mic", "character.bubble", "questionmark.bubble"][rawValue] }
+}
+
 struct HistoryView: View {
   @StateObject var m = HistoryModel()
-  @State var tab: Int
+  @State var page: HistoryPage?
   @State var query = ""
-  init(tab: Int = 0) { _tab = State(initialValue: tab) }
-  private let tabs = ["總覽", "全部", "口述", "翻譯", "提問"]
+  init(tab: Int = 0) { _page = State(initialValue: HistoryPage(rawValue: tab) ?? .overview) }
 
   var filtered: [HistoryEntry] {
-    let kind: Mode? = tab == 2 ? .dictate : tab == 3 ? .translate : tab == 4 ? .ask : nil
+    let kind: Mode? = page == .dictate ? .dictate : page == .translate ? .translate : page == .ask ? .ask : nil
     return m.items.filter { e in
       (kind == nil || e.kind == kind) &&
         (query.isEmpty || e.text.localizedCaseInsensitiveContains(query) || e.raw.localizedCaseInsensitiveContains(query))
@@ -93,43 +99,45 @@ struct HistoryView: View {
   }
 
   var body: some View {
-    VStack(spacing: 0) {
-      // 分頁列：純文字＋底線
-      HStack(spacing: 22) {
-        ForEach(tabs.indices, id: \.self) { i in
-          Button { tab = i; m.reload() } label: {
-            VStack(spacing: 5) {
-              Text(tabs[i]).fontWeight(tab == i ? .semibold : .regular).foregroundStyle(tab == i ? Color.primary : Color.secondary)
-              Rectangle().fill(tab == i ? Color.accentColor : Color.clear).frame(height: 2)
-            }.fixedSize()
-          }.buttonStyle(.plain)
+    NavigationSplitView {
+      List(HistoryPage.allCases, selection: $page) { p in
+        Label(p.title, systemImage: p.symbol).tag(p)
+      }
+      .navigationSplitViewColumnWidth(min: 150, ideal: 160, max: 190)
+      .onChange(of: page) { m.reload() }
+    } detail: {
+      Group {
+        if (page ?? .overview) == .overview { OverviewView() } else { historyList }
+      }
+      .navigationTitle((page ?? .overview).title)
+      .toolbar {
+        if (page ?? .overview) != .overview {
+          ToolbarItem {
+            Menu {
+              Picker("保存紀錄", selection: Binding(get: { m.historyDays }, set: { m.setRetention(history: $0) })) {
+                ForEach(retentionOptions, id: \.0) { Text($0.1).tag($0.0) }
+              }
+              Picker("保存錄音", selection: Binding(get: { m.audioDays }, set: { m.setRetention(audio: $0) })) {
+                ForEach(retentionOptions, id: \.0) { Text($0.1).tag($0.0) }
+              }
+              Divider()
+              Button("全部刪除…", role: .destructive) { m.deleteAll() }
+            } label: { Label("保存期限", systemImage: "clock.arrow.circlepath") }
+            .help("保存期限與刪除")
+          }
         }
       }
-      .padding(.top, 12)
-      Divider()
-      if tab == 0 { OverviewView() } else { historyList }
     }
-    .frame(width: 680, height: 600)
+    .searchable(text: $query, placement: .toolbar, prompt: "搜尋")
+    .frame(width: 780, height: 600)
   }
 
   var historyList: some View {
     VStack(spacing: 0) {
-      HStack {
-        TextField("搜尋", text: $query).textFieldStyle(.roundedBorder)
-        Picker("保存", selection: Binding(get: { m.historyDays }, set: { m.setRetention(history: $0) })) {
-          ForEach(retentionOptions, id: \.0) { Text($0.1).tag($0.0) }
-        }.frame(width: 130)
-        Picker("錄音", selection: Binding(get: { m.audioDays }, set: { m.setRetention(audio: $0) })) {
-          ForEach(retentionOptions, id: \.0) { Text($0.1).tag($0.0) }
-        }.frame(width: 130)
-        Button("全部刪除") { m.deleteAll() }
-      }
-      .padding(10)
-      if !m.notice.isEmpty { Text(m.notice).font(.caption).foregroundStyle(.secondary).padding(.bottom, 4) }
+      if !m.notice.isEmpty { Text(m.notice).font(.caption).foregroundStyle(.secondary).padding(.vertical, 4) }
       if filtered.isEmpty {
-        Spacer()
-        Text(m.historyDays == 0 ? "目前設定為不保存歷史" : "還沒有紀錄").foregroundStyle(.secondary)
-        Spacer()
+        ContentUnavailableView(m.historyDays == 0 ? "目前設定為不保存" : (query.isEmpty ? "還沒有紀錄" : "找不到"),
+                               systemImage: query.isEmpty ? "tray" : "magnifyingglass")
       } else {
         List(filtered) { e in row(e) }
       }
@@ -153,18 +161,14 @@ struct HistoryView: View {
         Text("\(f.string(from: e.date))  \(e.kind.label)  \(app)").font(.caption).foregroundStyle(.secondary)
         if let w = e.waitMs, e.status == "ok" { Text("等待 \(w) ms").font(.caption).foregroundStyle(.tertiary) }
         Spacer()
-        if m.retrying.contains(e.id) { Text("重試中…").font(.caption).foregroundStyle(.secondary) }
-        if !e.text.isEmpty { Button("複製") { m.copy(e.text) }.buttonStyle(.borderless) }
-        Menu("更多") {
-          if !e.raw.isEmpty && e.raw != e.text { Button("複製原稿") { m.copy(e.raw) } }
-          if e.audio != nil {
-            Button("重試") { m.retry(e) }
-            Button("另存錄音…") { m.saveAudio(e) }
-          }
-          Divider()
-          Button("刪除") { m.delete(e) }
+        if m.retrying.contains(e.id) { ProgressView().controlSize(.small) }
+        if !e.text.isEmpty {
+          Button { m.copy(e.text) } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless).help("複製")
         }
-        .menuStyle(.borderlessButton).fixedSize()
+        Menu {
+          rowActions(e)
+        } label: { Image(systemName: "ellipsis") }
+          .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("更多")
       }
       if let st = statusText(e) { Text(st).font(.callout).foregroundStyle(.orange) }
       if !e.text.isEmpty {
@@ -176,6 +180,18 @@ struct HistoryView: View {
       }
     }
     .padding(.vertical, 4)
+    .contextMenu { rowActions(e) }
+  }
+
+  @ViewBuilder func rowActions(_ e: HistoryEntry) -> some View {
+    if !e.text.isEmpty { Button("複製") { m.copy(e.text) } }
+    if !e.raw.isEmpty && e.raw != e.text { Button("複製原稿") { m.copy(e.raw) } }
+    if e.audio != nil {
+      Button("重試") { m.retry(e) }
+      Button("另存錄音…") { m.saveAudio(e) }
+    }
+    Divider()
+    Button("刪除", role: .destructive) { m.delete(e) }
   }
 }
 
@@ -190,12 +206,11 @@ struct OverviewView: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 22) {
-        Text("講出來，不要打字").font(.largeTitle).bold()
         // 數字：純文字排版，不用卡片框
         Grid(alignment: .leading, horizontalSpacing: 40, verticalSpacing: 18) {
           GridRow {
             stat("\(s.chars.formatted()) 字", "口述字數")
-            stat(fmtHours(s.savedHours), "省下的時間（以打字每分鐘 40 字估算）")
+            stat(fmtHours(s.savedHours), "省下的時間").help("以打字每分鐘 40 字估算")
           }
           GridRow {
             stat("\(s.perMinute) 字", "平均每分鐘")
@@ -206,7 +221,7 @@ struct OverviewView: View {
             stat("\(s.streak) 天／\(s.longest) 天", "目前連續／最長連續")
           }
         }
-        Text("使用熱度（最近 26 週）").font(.headline)
+        Text("最近 26 週").font(.headline)
         Heatmap(days: days)
       }
       .padding(28)
