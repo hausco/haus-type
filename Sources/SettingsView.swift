@@ -19,6 +19,12 @@ let cleanupModels: [(String, String)] = [
   ("anthropic/claude-sonnet-5.5", "Claude Sonnet 5.5（較聰明、較慢）"),
 ]
 
+let askModels: [(String, String)] = [
+  ("anthropic/claude-sonnet-5.5", "Claude Sonnet 5.5（建議，寫作與問答較好）"),
+  ("anthropic/claude-haiku-5.5", "Claude Haiku 5.5（較快、較便宜）"),
+  ("anthropic/claude-opus-5.5", "Claude Opus 5.5（最聰明、較慢較貴）"),
+]
+
 // 把 keyCode 轉回名稱，給自訂快捷鍵顯示用
 let keyNames: [Int64: String] = Dictionary(uniqueKeysWithValues: keyCodes.map { ($0.value, $0.key) })
 
@@ -36,10 +42,14 @@ func comboLabel(_ spec: String) -> String {
 }
 
 final class SettingsModel: ObservableObject {
-  @Published var useFn: Bool
-  @Published var useMouse: Bool
-  @Published var combo: String
-  @Published var recording = false
+  // 三種模式各自的快捷鍵：Fn 系列（口述 fn、翻譯 fn+shift、提問 fn+space）、滑鼠中鍵、自訂組合
+  @Published var fnOn: [Mode: Bool] = [:]
+  @Published var mouseOn: [Mode: Bool] = [:]
+  @Published var combos: [Mode: String] = [:]
+  @Published var recordingFor: Mode?
+  @Published var translateTargets: [String]
+  @Published var translateTarget: String
+  @Published var askModel: String
   @Published var sounds: Bool
   @Published var speculative: Bool
   @Published var cleanup: Bool
@@ -57,10 +67,9 @@ final class SettingsModel: ObservableObject {
   private var monitor: Any?
 
   init() {
-    let hk = config.strings("hotkeys")
-    useFn = hk.contains("fn")
-    useMouse = hk.contains("mouse2")
-    combo = hk.first { $0 != "fn" && $0 != "mouse2" } ?? ""
+    translateTargets = config.strings("translateTargets")
+    translateTarget = currentTranslateTarget()
+    askModel = config.string("askModel")
     sounds = config.bool("sounds")
     speculative = config.bool("speculative")
     cleanup = config.bool("cleanup")
@@ -70,22 +79,48 @@ final class SettingsModel: ObservableObject {
     login = SMAppService.mainApp.status == .enabled
     hasKey = apiKey() != nil
     terms = VocabStore.userTerms()
+    var f: [Mode: Bool] = [:], ms: [Mode: Bool] = [:], cs: [Mode: String] = [:]
+    for m in [Mode.dictate, .translate, .ask] {
+      let hk = config.strings(SettingsModel.key(m)).map { $0.lowercased() }
+      f[m] = hk.contains(SettingsModel.fnSpec(m))
+      ms[m] = hk.contains("mouse2")
+      cs[m] = hk.first { !$0.hasPrefix("fn") && $0 != "mouse2" } ?? ""
+    }
+    fnOn = f; mouseOn = ms; combos = cs
   }
 
   func changed() { NotificationCenter.default.post(name: .yuConfigChanged, object: nil) }
 
-  func saveHotkeys() {
+  static func key(_ m: Mode) -> String { m == .dictate ? "hotkeys" : m == .translate ? "translateHotkeys" : "askHotkeys" }
+  static func fnSpec(_ m: Mode) -> String { m == .dictate ? "fn" : m == .translate ? "fn+shift" : "fn+space" }
+
+  func saveHotkeys(_ m: Mode) {
+    // 滑鼠中鍵只能給一種模式
+    if mouseOn[m] == true { for o in [Mode.dictate, .translate, .ask] where o != m && mouseOn[o] == true { mouseOn[o] = false; write(o) } }
+    write(m)
+    changed()
+  }
+
+  private func write(_ m: Mode) {
     var hk: [String] = []
-    if useFn { hk.append("fn") }
-    if useMouse { hk.append("mouse2") }
-    if !combo.isEmpty { hk.append(combo) }
-    config.set("hotkeys", hk)
+    if fnOn[m] == true { hk.append(SettingsModel.fnSpec(m)) }
+    if mouseOn[m] == true { hk.append("mouse2") }
+    if let c = combos[m], !c.isEmpty { hk.append(c) }
+    config.set(SettingsModel.key(m), hk)
+  }
+
+  func toggleTarget(_ lang: String, _ on: Bool) {
+    if on { if !translateTargets.contains(lang) && translateTargets.count < 3 { translateTargets.append(lang) } }
+    else { translateTargets.removeAll { $0 == lang } }
+    if !translateTargets.contains(translateTarget) { translateTarget = translateTargets.first ?? "英文" }
+    config.set("translateTargets", translateTargets)
+    config.set("translateTarget", translateTarget)
     changed()
   }
 
   // 錄製自訂快捷鍵：下一個帶修飾鍵的按鍵就是新組合
-  func startRecording() {
-    recording = true
+  func startRecording(_ mode: Mode) {
+    recordingFor = mode
     monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
       guard let self else { return e }
       if e.keyCode == 53 { self.stopRecording(); return nil } // Esc 取消
@@ -97,15 +132,14 @@ final class SettingsModel: ObservableObject {
       guard let name = keyNames[Int64(e.keyCode)] else { return nil }
       // 單鍵只接受 F13 以上，避免一般字母被吃掉
       if parts.isEmpty && !name.hasPrefix("f") { return nil }
-      self.combo = (parts + [name]).joined(separator: "+")
+      if let m = self.recordingFor { self.combos[m] = (parts + [name]).joined(separator: "+"); self.saveHotkeys(m) }
       self.stopRecording()
-      self.saveHotkeys()
       return nil
     }
   }
 
   func stopRecording() {
-    recording = false
+    recordingFor = nil
     if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
   }
 
@@ -164,7 +198,7 @@ final class SettingsModel: ObservableObject {
 struct SettingsView: View {
   @StateObject var m = SettingsModel()
   @State var tab = 0
-  private let tabs = ["一般", "金鑰與模型", "專有名詞", "實驗功能", "關於"]
+  private let tabs = ["一般", "快捷鍵", "金鑰與模型", "專有名詞", "實驗功能", "關於"]
 
   var body: some View {
     VStack(spacing: 0) {
@@ -187,9 +221,10 @@ struct SettingsView: View {
       Group {
         switch tab {
         case 0: general
-        case 1: keyAndModel
-        case 2: vocab
-        case 3: labs
+        case 1: shortcuts
+        case 2: keyAndModel
+        case 3: vocab
+        case 4: labs
         default: about
         }
       }
@@ -201,21 +236,7 @@ struct SettingsView: View {
 
   var general: some View {
     Form {
-      Section("快捷鍵（按一下開始、再按一下結束；按住超過 1 秒放開也會結束）") {
-        Toggle("Fn（🌐）鍵", isOn: $m.useFn).onChange(of: m.useFn) { m.saveHotkeys() }
-        Toggle("滑鼠中鍵", isOn: $m.useMouse).onChange(of: m.useMouse) { m.saveHotkeys() }
-        HStack {
-          Text("自訂組合鍵")
-          Spacer()
-          Text(m.recording ? "請按下組合鍵…（Esc 取消）" : (m.combo.isEmpty ? "未設定" : comboLabel(m.combo)))
-            .foregroundStyle(.secondary)
-          Button(m.recording ? "取消" : "錄製") { m.recording ? m.stopRecording() : m.startRecording() }
-          if !m.combo.isEmpty && !m.recording { Button("清除") { m.combo = ""; m.saveHotkeys() } }
-        }
-        Text("用 Fn 鍵前，請到「系統設定 → 鍵盤 → 按下 🌐 鍵時」選「不做任何事」。錄音中按 Esc 可取消。")
-          .font(.caption).foregroundStyle(.secondary)
-      }
-      Section("其他") {
+      Section("一般") {
         Toggle("提示音", isOn: $m.sounds).onChange(of: m.sounds) { config.set("sounds", m.sounds) }
         Toggle("預先轉寫（講完停頓時先送出，按結束後更快貼上）", isOn: $m.speculative)
           .onChange(of: m.speculative) { config.set("speculative", m.speculative) }
@@ -228,6 +249,42 @@ struct SettingsView: View {
     }
     .formStyle(.columns)
     .padding(20)
+  }
+
+  // 快捷鍵頁：三種模式各一組
+  var shortcuts: some View {
+    Form {
+      shortcutSection(.dictate, title: "口述：講的話整理後打進游標處", fnLabel: "Fn（🌐）")
+      shortcutSection(.translate, title: "翻譯：講中文，打出目標語言", fnLabel: "Fn＋Shift")
+      Section {
+        ForEach(translateLanguages, id: \.self) { lang in
+          Toggle(lang, isOn: Binding(get: { m.translateTargets.contains(lang) }, set: { m.toggleTarget(lang, $0) }))
+            .disabled(!m.translateTargets.contains(lang) && m.translateTargets.count >= 3)
+        }
+      } header: {
+        Text("翻譯目標（最多 3 種，選單列可以切換目前用哪一種）")
+      }
+      shortcutSection(.ask, title: "隨便問：選取字後改寫或提問，沒選取時幫你寫或回答", fnLabel: "Fn＋Space")
+      Text("按一下開始、再按一下結束；按住超過 1 秒放開也會結束；錄音中按 Esc 取消。用 Fn 前，請到「系統設定 → 鍵盤 → 按下 🌐 鍵時」選「不做任何事」。")
+        .font(.caption).foregroundStyle(.secondary)
+    }
+    .formStyle(.columns)
+    .padding(20)
+  }
+
+  func shortcutSection(_ mode: Mode, title: String, fnLabel: String) -> some View {
+    Section(title) {
+      Toggle(fnLabel, isOn: Binding(get: { m.fnOn[mode] ?? false }, set: { m.fnOn[mode] = $0; m.saveHotkeys(mode) }))
+      Toggle("滑鼠中鍵", isOn: Binding(get: { m.mouseOn[mode] ?? false }, set: { m.mouseOn[mode] = $0; m.saveHotkeys(mode) }))
+      HStack {
+        Text("自訂組合鍵")
+        Spacer()
+        let c = m.combos[mode] ?? ""
+        Text(m.recordingFor == mode ? "請按下組合鍵…（Esc 取消）" : (c.isEmpty ? "未設定" : comboLabel(c))).foregroundStyle(.secondary)
+        Button(m.recordingFor == mode ? "取消" : "錄製") { m.recordingFor == mode ? m.stopRecording() : m.startRecording(mode) }
+        if !c.isEmpty && m.recordingFor != mode { Button("清除") { m.combos[mode] = ""; m.saveHotkeys(mode) } }
+      }
+    }
   }
 
   var keyAndModel: some View {
@@ -256,6 +313,9 @@ struct SettingsView: View {
         Picker("整理模型", selection: $m.cleanupModel) {
           ForEach(cleanupModels, id: \.0) { Text($0.1).tag($0.0) }
         }.disabled(!m.cleanup).onChange(of: m.cleanupModel) { config.set("cleanupModel", m.cleanupModel) }
+        Picker("隨便問模型", selection: $m.askModel) {
+          ForEach(askModels, id: \.0) { Text($0.1).tag($0.0) }
+        }.onChange(of: m.askModel) { config.set("askModel", m.askModel) }
         Text("費用由你的 OpenRouter 帳戶支付。一天講 1 小時，轉寫加整理一個月約 3 到 8 美元。")
           .font(.caption).foregroundStyle(.secondary)
       }
