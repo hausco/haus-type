@@ -136,7 +136,8 @@ enum Answers {
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
     p.isOpaque = false
     p.backgroundColor = .clear
-    p.hasShadow = true
+    // macOS 26 以上玻璃自己有陰影，視窗陰影會在圓角外多一圈黑邊
+    if #available(macOS 26.0, *) { p.hasShadow = false } else { p.hasShadow = true }
     p.level = .floating
     p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     p.isMovableByWindowBackground = true

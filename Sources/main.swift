@@ -1407,6 +1407,14 @@ if let i = args.firstIndex(of: "--test-learn"), i + 3 < args.count {
   } else { print("沒有可學的修改") }
   exit(0)
 }
+// 開發用：直接顯示答案視窗 5 秒，檢查外觀
+if args.contains("--show-answer") {
+  let app = NSApplication.shared
+  app.setActivationPolicy(.accessory)
+  Answers.show(question: "Gatekeeper 是什麼？", answer: "Gatekeeper 是 macOS 的安全機制，會在 App 執行前檢查簽章與公證。\n\n1. 有 Developer ID 簽章\n2. 通過 Apple 公證", insertTo: 0)
+  DispatchQueue.main.asyncAfter(deadline: .now() + 5) { exit(0) }
+  app.run()
+}
 if args.contains("--categorize") {
   ensureHome()
   let sem = DispatchSemaphore(value: 0)
