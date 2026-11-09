@@ -58,6 +58,9 @@ final class SettingsModel: ObservableObject {
   @Published var translateTargets: [String]
   @Published var translateTarget: String
   @Published var askModel: String
+  @Published var engine = config.string("transcribeEngine")
+  @Published var localStatus = ""
+  private var stateObs: Any?
   @Published var sounds: Bool
   @Published var speculative: Bool
   @Published var cleanup: Bool
@@ -110,6 +113,24 @@ final class SettingsModel: ObservableObject {
       cs[m] = hk.first { !$0.hasPrefix("fn") && $0 != "mouse2" } ?? ""
     }
     fnOn = f; mouseOn = ms; combos = cs
+    stateObs = NotificationCenter.default.addObserver(forName: .localASRState, object: nil, queue: .main) { [weak self] _ in self?.refreshLocalStatus() }
+    refreshLocalStatus()
+  }
+
+  func refreshLocalStatus() {
+    switch LocalASR.shared.state {
+    case .ready: localStatus = "本機模型已就緒"
+    case .starting: localStatus = "本機模型載入中…"
+    case .failed(let why): localStatus = "\(why)，聽寫會自動改用雲端"
+    case .off: localStatus = LocalASR.shared.missingReason().map { "\($0)，聽寫會自動改用雲端" } ?? "本機模型未啟動"
+    }
+  }
+
+  func setEngine(_ e: String) {
+    engine = e
+    config.set("transcribeEngine", e)
+    changed()
+    refreshLocalStatus()
   }
 
   func changed() { NotificationCenter.default.post(name: .yuConfigChanged, object: nil) }
@@ -428,8 +449,19 @@ struct SettingsView: View {
         }
         if !m.keyStatus.isEmpty { Text(m.keyStatus).font(.caption).foregroundStyle(.secondary) }
       }
+      Section("語音辨識") {
+        Picker("辨識引擎", selection: Binding(get: { m.engine }, set: { m.setEngine($0) })) {
+          Text("雲端（OpenRouter，準又快）").tag("cloud")
+          Text("本機（Breeze-ASR-25，錄音不離開這台 Mac）").tag("local")
+        }
+        if m.engine == "local" {
+          Text(m.localStatus).font(.caption).foregroundStyle(.secondary)
+          Text("本機模式只有整理、翻譯、隨便問會把文字送到 OpenRouter；錄音本身不送出。需要 Apple Silicon 與約 3 GB 的模型，安裝方式見 README。")
+            .font(.caption).foregroundStyle(.secondary)
+        }
+      }
       Section("模型") {
-        Picker("語音轉文字", selection: $m.transcribeModel) {
+        Picker("雲端語音轉文字", selection: $m.transcribeModel) {
           ForEach(transcribeModels, id: \.0) { Text($0.1).tag($0.0) }
         }.onChange(of: m.transcribeModel) { config.set("transcribeModel", m.transcribeModel) }
         Toggle("AI 整理（去贅字、改口、條列、依 app 調語氣）", isOn: $m.cleanup)

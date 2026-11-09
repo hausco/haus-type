@@ -23,6 +23,10 @@ let logURL = homeDir.appendingPathComponent("haustype.log")
 let defaultConfig: [String: Any] = [
   "transcribeURL": "https://openrouter.ai/api/v1/audio/transcriptions",
   "transcribeModel": "openai/gpt-transcribe",
+  // 辨識引擎：cloud（OpenRouter）或 local（本機 Breeze-ASR-25，錄音不出這台 Mac）
+  "transcribeEngine": "cloud",
+  "localPython": "~/.haustype/local/venv/bin/python",
+  "localModel": "~/.haustype/local/breeze-mlx-fp16",
   "language": "zh",
   "chatURL": "https://openrouter.ai/api/v1/chat/completions",
   "cleanupModel": "anthropic/claude-haiku-5.5",
@@ -116,6 +120,9 @@ final class Config {
     self.user = user
     for (k, v) in user { dict[k] = v }
   }
+
+  // 只在這次執行中覆蓋設定，不寫檔（終端機測試用）
+  func override(_ k: String, _ v: Any) { dict[k] = v }
 
   // 改一個設定並寫回 config.json（設定視窗用）
   func set(_ k: String, _ v: Any?) {
@@ -483,8 +490,26 @@ func send(_ req: URLRequest) async throws -> [String: Any] {
   return obj
 }
 
-// 轉寫：OpenAI 官方走 multipart，其他（OpenRouter）走 JSON + base64
+// 本機辨識退回雲端時的原因（貼上後提示一次）
+var lastTranscribeFallback: String?
+
+// 轉寫：本機模式先用 Breeze，失敗才退回雲端；雲端是 OpenAI 官方走 multipart，其他（OpenRouter）走 JSON + base64
 func transcribe(_ wavData: Data, key: String) async throws -> String {
+  if config.string("transcribeEngine") == "local" {
+    do {
+      let t = try await LocalASR.shared.transcribe(wavData)
+      lastTranscribeFallback = nil
+      return (t.applyingTransform(StringTransform("Hans-Hant"), reverse: false) ?? t).trimmingCharacters(in: .whitespacesAndNewlines)
+    } catch {
+      if Task.isCancelled { throw error }
+      log("本機辨識失敗，改用雲端：\(error.localizedDescription)")
+      lastTranscribeFallback = error.localizedDescription
+    }
+  }
+  return try await transcribeCloud(wavData, key: key)
+}
+
+func transcribeCloud(_ wavData: Data, key: String) async throws -> String {
   let urlString = config.string("transcribeURL")
   let model = config.string("transcribeModel")
   let lang = config.string("language")
@@ -887,6 +912,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     setIcon("mic")
     buildMenu()
     OutputMute.recoverIfNeeded()
+    if config.string("transcribeEngine") == "local" { LocalASR.shared.start() }
     DispatchQueue.global(qos: .utility).async { HistoryStore.prune() }
     Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { _ in DispatchQueue.global(qos: .utility).async { HistoryStore.prune() } }
     applyDockPolicy()
@@ -897,6 +923,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       self.configureHotkeys()
       self.buildMenu()
       self.applyDockPolicy()
+      if config.string("transcribeEngine") == "local" { LocalASR.shared.start() } else { LocalASR.shared.stop() }
       if apiKey() != nil, self.statusLine.title.contains("金鑰") { self.setStatus("待命", icon: "mic") }
       self.autoPull()
     }
@@ -1170,6 +1197,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                   "ms_transcribe": o.msT, "ms_cleanup": o.msC, "wait_ms": waitMs, "speculative": hit]
       if let audio { entry["audio"] = audio }
       if let err = o.error { entry["error"] = err }
+      // 這段用哪個辨識引擎（本機失敗退回雲端記 local→cloud）
+      let eng = config.string("transcribeEngine")
+      entry["engine"] = eng == "local" && lastTranscribeFallback != nil ? "local→cloud" : eng
       HistoryStore.append(entry)
       if let err = o.error {
         self.setStatus(err, icon: "exclamationmark.triangle")
@@ -1192,6 +1222,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       paste(o.text)
       Learner.watch(pid: ctx.pid, pasted: o.text)
       self.hud.hide()
+      if let why = lastTranscribeFallback {
+        lastTranscribeFallback = nil
+        self.hud.flash("本機辨識無法使用，這次改用雲端：\(why.prefix(30))", seconds: 3)
+      }
       self.setStatus("已貼上（等待 \(waitMs) ms\(hit ? "，預先轉寫" : "")，\(o.note)）", icon: "checkmark")
       DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
         if !self.recording && self.busy == 0 { self.setIcon("mic") }
@@ -1266,7 +1300,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     } catch { log("登入項目設定失敗：\(error)") }
     loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
   }
-  @objc private func quit() { NSApp.terminate(nil) }
+  @objc private func quit() {
+    LocalASR.shared.stop(); NSApp.terminate(nil) }
 }
 
 // 重新啟動自己（取得輔助使用權限後 macOS 要重開程式才生效）
@@ -1298,6 +1333,7 @@ func appendHistoryLegacy(_ entry: [String: Any]) {
 func runTest(_ args: [String]) -> Int32 {
   ensureHome()
   func opt(_ name: String) -> String? { args.firstIndex(of: name).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+  if let e = opt("--engine") { config.override("transcribeEngine", e) }
   guard let key = apiKey() else { print("找不到金鑰"); return 1 }
   var ctx = Context()
   ctx.bundle = opt("--bundle") ?? ""

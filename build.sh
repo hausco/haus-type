@@ -24,6 +24,7 @@ swiftc -O -target x86_64-apple-macos14 -o "$TMPBIN/x86_64" Sources/*.swift
 lipo -create "$TMPBIN/arm64" "$TMPBIN/x86_64" -output "$OUT/Contents/MacOS/$EXEC"
 
 cp icon/AppIcon.icns "$OUT/Contents/Resources/AppIcon.icns"
+cp local/breeze_server.py "$OUT/Contents/Resources/breeze_server.py"
 
 # 2. Info.plist：LSUIElement＝只在選單列，不出現在 Dock
 cat > "$OUT/Contents/Info.plist" <<PLIST
